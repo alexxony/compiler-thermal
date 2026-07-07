@@ -1,0 +1,15 @@
+[project]
+name = "compiler-thermal-loop"
+version = "0.0.1"
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0"]
+
+[project.optional-dependencies]
+local = ["pytest>=8.0"]
+colab = ["nvidia-ml-py", "pytwin"]
+
+[tool.setuptools]
+packages = ["thermal", "canary"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

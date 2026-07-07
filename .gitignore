@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+artifacts/
+*.twin
+*.fmu
+.venv/
+
+# tool state
+.omc/
+*.egg-info/
