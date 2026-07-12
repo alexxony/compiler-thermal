@@ -39,7 +39,13 @@ class Signal:
     op_weight: float = 0.0        # 그 연산자 / 전체 self CUDA time (0~1)
     op_shape: str = ""            # 입력 텐서 모양 (record_shapes=True). "큰 GEMM vs 작은" 룰용
     # Compiler_Thermal 열 축 (Task 7~9, thermal/measure.merge_signals 출력) — GPU-Solver 원본엔 없음
-    energy_j: float = 0.0         # PowerSampler 사다리꼴 적분 (열 판정 1차 프록시, harness mode="thermal")
+    energy_j: float = 0.0         # PowerSampler 사다리꼴 적분, 전력 런 창(loop_seconds) 전체 총 에너지.
+                                   # 원시 데이터로 보존 — 목적함수엔 안 씀(아래 energy_per_iter_j 참고).
+                                   # ⚠️ 창이 고정 길이(3.0s)라 커널이 빠를수록 창 안에 반복이 더 들어가는데
+                                   # 이 필드는 그 반복 수를 안 나눔 → 사실상 avg_power×상수시간이 되어
+                                   # 빠른 커널을 불리하게 판정(A100 TF32 실측서 발견, 2026-07-12).
+    energy_per_iter_j: float = 0.0  # = power_avg_w × kernel_time_s(ncu 단일 커널 1회 실행시간).
+                                   # harness mode="thermal" 목적함수 — 일(work) 단위 정규화된 에너지.
     p_hbm_w: float = 0.0          # HBM 몫 (dram_bytes × pj_per_bit 분해)
     p_die_w: float = 0.0          # die 몫 (총 전력 − p_hbm_w)
     dram_bytes_read: float = 0.0  # ncu 절대 트래픽(바이트) — split_power 입력. bw_pct(%)와 별개.
@@ -207,6 +213,11 @@ def detect_chip(cc: tuple[int, int] | None = None, name: str = "") -> str:
 
     cc 예: (8,0)=A100, (9,0)=H100, (7,5)=T4, (7,0)=V100.
     GPU 없는 로컬선 호출 안 됨 — Colab watch가 torch.cuda로 채움.
+
+    반환값은 이 파일의 CHIP_CAPS(짧은 키: a100/h100/t4/v100, TF32 가드용)와
+    일치해야 한다. thermal/chip_caps.py의 CHIP_CAPS(전체 디바이스명 키,
+    TDP/mem_type용)는 이름만 같은 별도 딕셔너리 — executor._profile_thermal이
+    merge_signals 호출 전 별도 변환한다(P3, Colab A100 실측서 확인).
     """
     CC_MAP = {(8, 0): "a100", (9, 0): "h100", (7, 5): "t4", (7, 0): "v100"}
     if cc and cc in CC_MAP:

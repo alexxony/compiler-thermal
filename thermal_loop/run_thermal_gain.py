@@ -57,12 +57,14 @@ def _run_track(label, problem, seed_code, variant_map, max_rounds,
                       profiler=profiler, submit_kind="thermal")
     led = Ledger(str(ledger_path))
     recs = [r for r in led.records if r.problem == problem]
-    curve = led.metric_curve(problem)   # [(round, -energy_j)]
+    curve = led.metric_curve(problem)   # [(round, -energy_per_iter_j)]
     fired = [r.hypothesis_label for r in recs]
     wasted = sum(1 for r in recs if r.passed and not r.improved)
     retires = sum(1 for e in res.events if e.kind == "retire")
-    # 열 축 원신호 보존(리포트용) — energy_j/p_hbm_w/p_die_w는 metric 곡선(음수화)엔 없음.
+    # 열 축 원신호 보존(리포트용) — energy_j(원시,고정창 총합)/energy_per_iter_j(목적함수,
+    # 일단위 정규화)/p_hbm_w/p_die_w는 metric 곡선(음수화)엔 energy_per_iter_j만 실린다.
     thermal_series = [(r.round_idx, r.signal.get("energy_j", 0.0),
+                       r.signal.get("energy_per_iter_j", 0.0),
                        r.signal.get("p_hbm_w", 0.0), r.signal.get("p_die_w", 0.0))
                       for r in recs if r.passed]
     return {
@@ -75,20 +77,21 @@ def _run_track(label, problem, seed_code, variant_map, max_rounds,
 
 def _report(on: dict, off: dict) -> None:
     print("\n" + "=" * 56)
-    print("열-gain 비교 — 진화 ON vs OFF (metric=thermal, energy_j)")
+    print("열-gain 비교 — 진화 ON vs OFF (metric=thermal, energy_per_iter_j)")
     print("=" * 56)
 
     def _best_energy(t):
         vals = [m for _, m in t["curve"] if m != 0.0]
-        return (-max(vals)) if vals else None   # metric=-energy_j → best(max)=최소 에너지
+        return (-max(vals)) if vals else None   # metric=-energy_per_iter_j → best(max)=최소 에너지
 
     for t in (off, on):
         print(f"\n[{t['label']}] rounds={t['rounds']} stop={t['stop_reason']}")
-        print(f"  energy 곡선(J): {[round(e, 4) for _, e, _, _ in t['thermal_series']]}")
-        print(f"  p_hbm 곡선(W) : {[round(p, 2) for _, _, p, _ in t['thermal_series']]}")
-        print(f"  p_die 곡선(W) : {[round(p, 2) for _, _, _, p in t['thermal_series']]}")
+        print(f"  energy 곡선(J, 원시-고정창 총합): {[round(e, 4) for _, e, _, _, _ in t['thermal_series']]}")
+        print(f"  energy/iter 곡선(J, 목적함수)    : {[round(e, 6) for _, _, e, _, _ in t['thermal_series']]}")
+        print(f"  p_hbm 곡선(W) : {[round(p, 2) for _, _, _, p, _ in t['thermal_series']]}")
+        print(f"  p_die 곡선(W) : {[round(p, 2) for _, _, _, _, p in t['thermal_series']]}")
         be = _best_energy(t)
-        print(f"  best(최소) energy: {round(be, 4) if be is not None else 'N/A'} J")
+        print(f"  best(최소) energy/iter: {round(be, 6) if be is not None else 'N/A'} J")
         print(f"  발화 룰     : {t['fired_rules']}")
         print(f"  헛라운드    : {t['wasted_rounds']}")
         print(f"  retire 수   : {t['retire_count']}")
@@ -97,15 +100,16 @@ def _report(on: dict, off: dict) -> None:
     bon, boff = _best_energy(on), _best_energy(off)
     if bon is not None and boff is not None:
         if bon < boff:
-            print(f"  ★열-gain★ ON best={bon:.4f}J < OFF best={boff:.4f}J (진화→에너지 덜 쓰는 커널)")
+            ratio = boff / bon if bon > 0 else float("inf")
+            print(f"  ★열-gain★ ON best={bon:.6f}J/iter < OFF best={boff:.6f}J/iter ({ratio:.2f}× 개선, 진화→일당 에너지 덜 쓰는 커널)")
         else:
-            print(f"  ⚠️ 열-gain 없음 — ON best={bon:.4f}J, OFF best={boff:.4f}J")
+            print(f"  ⚠️ 열-gain 없음 — ON best={bon:.6f}J/iter, OFF best={boff:.6f}J/iter")
     else:
         print("  ⚠️ 에너지 측정 부재 (칩/전력 미탐지 — merge_signals 미실행 라운드만 있었음)")
 
     print("\n⚠️ 정직 캐비앗: TF32는 DRAM 트래픽을 거의 안 바꾼다(A@B 크기 불변) →")
-    print("   p_hbm_w는 ON/OFF 간 거의 불변이 예상 방향. energy 개선이 있다면 그건")
-    print("   주로 p_die_w(연산시간 단축)에서 온다 — speed-gain과 heat-gain이 같은 방향인지")
+    print("   p_hbm_w는 ON/OFF 간 거의 불변이 예상 방향. energy/iter 개선이 있다면 그건")
+    print("   주로 kernel_time_s 단축(p_die_w 자체는 순간전력이라 오를 수 있음)에서 온다 —")
     print("   원인(트래픽 vs 연산시간)까지 이 리포트의 p_hbm/p_die 곡선으로 분리해서 봐야 한다.")
 
 
@@ -131,9 +135,13 @@ def main() -> int:
 
     print(f"열-gain (가설-조건부) — {problem}, max_rounds={max_rounds}")
     print(f"  variant_map: {list(variant_map)} (seed=base)")
-    print(f"  ON=fp32 발화→TF32→energy_j 재측정 / OFF=fp32 영원 발화, retire 불가\n")
+    print(f"  ON=fp32 발화→TF32→energy_per_iter_j 재측정 / OFF=fp32 영원 발화, retire 불가\n")
 
-    base = MAILBOX.parent / f"thermal-gain-{problem}"
+    # ledger 출력 경로 명시 고정 — 예전엔 MAILBOX.parent(~/workspace/)에 떨어져
+    # 원시 결과 회수가 늦어짐(2026-07-12 A100 1차 실측). loop/artifacts/ 고정.
+    artifacts_dir = Path(__file__).resolve().parents[1] / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    base = artifacts_dir / f"thermal-gain-{problem}"
     off = _run_track("evolve_OFF", problem, seed_code, variant_map,
                      max_rounds, False, f"{base}-off.jsonl", profiler=profiler)
     on = _run_track("evolve_ON", problem, seed_code, variant_map,

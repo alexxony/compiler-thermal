@@ -25,6 +25,7 @@ import io
 import subprocess
 import sys
 import tempfile
+import time
 
 # signals는 같은 패키지. ncu CSV → Signal 정규화.
 try:
@@ -287,6 +288,16 @@ def _profile_thermal(cmd: dict) -> dict:
     이미 확인했다고 가정하지 않음 — 이 함수도 자체로 gate 먼저 확인(단독 호출 대비).
     """
     from thermal.measure import merge_signals
+    from thermal.chip_caps import CHIP_CAPS as PHYS_CHIP_CAPS
+
+    # signals.detect_chip()은 짧은 키(a100/h100/t4/v100, TF32 가드용,
+    # thermal_loop/signals.py의 별도 CHIP_CAPS)를 반환한다. thermal/chip_caps.py의
+    # CHIP_CAPS(TDP/mem_type/pj_per_bit)는 전체 디바이스명이 키 — 이름만 같은
+    # 별도 딕셔너리라 직접 조회하면 KeyError(Colab A100 실측서 발견). 여기서 변환.
+    _SHORT_TO_PHYS = {"a100": "NVIDIA A100-SXM4-40GB", "t4": "Tesla T4"}
+    for _full in PHYS_CHIP_CAPS:
+        if _full.lower().startswith("nvidia l4"):
+            _SHORT_TO_PHYS.setdefault("l4", _full)
 
     rid = cmd.get("id", "?")
     code = cmd["code"]
@@ -306,11 +317,12 @@ def _profile_thermal(cmd: dict) -> dict:
     kernel_time_s = ncu_sig.get("latency_us", 0.0) * 1e-6
 
     chip = _detect_chip_now()
+    phys_chip = _SHORT_TO_PHYS.get(chip, "")
     power = _profile_power(mod, loop_seconds=cmd.get("loop_seconds", 3.0))
     thermal_sig = {}
-    if chip and kernel_time_s > 0 and power["avg_power_w"] > 0:
+    if phys_chip and kernel_time_s > 0 and power["avg_power_w"] > 0:
         thermal_sig = merge_signals(
-            chip=chip,
+            chip=phys_chip,
             ncu={"dram_bytes_read": dram_read, "dram_bytes_write": dram_write,
                  "kernel_time_s": kernel_time_s},
             power=power,

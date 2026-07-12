@@ -37,14 +37,18 @@ def _metric(sig, mode: str = "occupancy") -> float:
     mode="occupancy"(기본, 기존 동작): occupancy 우선, 없으면 bw_pct = 자원활용도.
     mode="latency": -latency_us 반환 = 더 빠른 커널일수록 큰 값(덜 음수). 성능 gain용.
       latency_us=0(미측정)이면 -inf 처리 안 함 → 0 반환(중립). 음수화로 m>best 로직 무변.
-    mode="thermal" (Compiler_Thermal P3): -energy_j 반환 = 에너지 적을수록 큰 값.
-      latency와 동일 패턴(0=미측정→중립 0.0). judge 지표만 다르고 판정 로직(m>best)은
-      GPU-Solver 원본과 완전 동일 — retire/evolve/ledger 무변경 재사용의 근거.
+    mode="thermal" (Compiler_Thermal P3): -energy_per_iter_j 반환 = 일(work) 단위로
+      정규화된 에너지가 적을수록 큰 값. energy_j(전력 런 고정 창 전체 적분)는
+      반복 수를 안 나눠 빠른 커널을 불리하게 판정하는 아티팩트가 있어(A100 TF32
+      실측서 발견, 2026-07-12) 목적함수에서 뺐다 — energy_per_iter_j = 총 전력 ×
+      커널 1회 실행시간(ncu 측정)로 대체. latency와 동일 패턴(0=미측정→중립 0.0).
+      판정 로직(m>best)은 GPU-Solver 원본과 완전 동일 — retire/evolve/ledger
+      무변경 재사용의 근거.
     """
     if mode == "latency":
         return -sig.latency_us if sig.latency_us > 0 else 0.0
     if mode == "thermal":
-        return -sig.energy_j if sig.energy_j > 0 else 0.0
+        return -sig.energy_per_iter_j if sig.energy_per_iter_j > 0 else 0.0
     return sig.occupancy if sig.occupancy > 0 else sig.bw_pct
 
 
