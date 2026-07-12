@@ -151,11 +151,17 @@ class ColabExecProfiler:
 
 def setup_remote(session: str, local_loop_dir: str = ".",
                  remote_dir: str = "/content/loop",
-                 run_fn: Callable[[list[str]], None] | None = None) -> None:
+                 run_fn: Callable[[list[str]], None] | None = None,
+                 thermal: bool = False, local_thermal_dir: str | None = None) -> None:
     """Colab 세션에 executor 의존 순수모듈 배포 (1회). executor import 가능하게.
 
     wrapper는 매 호출 cmd 임베드해 생성하므로 여기선 안 올림.
     run_fn = subprocess 실행자(테스트 주입). 기본 = 실제 colab upload.
+
+    thermal=True (Compiler_Thermal P3): executor._profile_thermal이 import하는
+    thermal/{chip_caps,hbm_split,power_sampler,measure}.py도 함께 배포.
+    local_thermal_dir 생략 시 local_loop_dir의 부모(../thermal) 가정
+    (repo 구조: loop/thermal_loop + loop/thermal 형제 디렉토리).
     """
     def _up(local: str, remote: str):
         argv = ["colab", "upload", "-s", session, local, remote]
@@ -167,6 +173,12 @@ def setup_remote(session: str, local_loop_dir: str = ".",
     loop = Path(local_loop_dir)
     for name in ("signals.py", "glue.py", "executor.py"):
         _up(str(loop / name), f"{remote_dir}/{name}")
+
+    if thermal:
+        tdir = Path(local_thermal_dir) if local_thermal_dir else loop.parent / "thermal"
+        for name in ("__init__.py", "chip_caps.py", "hbm_split.py",
+                    "power_sampler.py", "measure.py", "twin_eval.py"):
+            _up(str(tdir / name), f"{remote_dir}/thermal/{name}")
 
 
 # ── self-check: colab-cli·GPU·git 0. run_fn 주입으로 왕복 검증. ──
