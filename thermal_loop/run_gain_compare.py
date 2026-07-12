@@ -141,6 +141,11 @@ def _report(on: TrackResult, off: TrackResult, metric_mode: str = "occupancy") -
         vals = [m for _, m in t.metric_curve if m != 0.0]
         return (-max(vals)) if vals else None
 
+    def _best_energy(t):
+        # thermal mode: metric = -energy_per_iter_j. best(max) = 최소 에너지. J로 복원.
+        vals = [m for _, m in t.metric_curve if m != 0.0]
+        return (-max(vals)) if vals else None
+
     for t in (off, on):
         if metric_mode == "latency":
             # 곡선 us 복원 (음수→양수), best = 최소 latency
@@ -149,6 +154,13 @@ def _report(on: TrackResult, off: TrackResult, metric_mode: str = "occupancy") -
             print(f"\n[{t.label}] rounds={t.rounds} stop={t.stop_reason}")
             print(f"  latency 곡선: {us} us")
             print(f"  best(최저)  : {round(bl,2) if bl is not None else 'N/A'} us")
+        elif metric_mode == "thermal":
+            # 곡선 J/iter 복원 (음수→양수), best = 최소 energy_per_iter_j (P4 report_p4_deltat.py 표 포맷 참고)
+            joules = [round(-m, 6) for _, m in t.metric_curve]
+            be = _best_energy(t)
+            print(f"\n[{t.label}] rounds={t.rounds} stop={t.stop_reason}")
+            print(f"  energy/iter 곡선: {joules} J")
+            print(f"  best(최소)      : {round(be,6) if be is not None else 'N/A'} J")
         else:
             ms = [round(m, 4) for _, m in t.metric_curve]
             print(f"\n[{t.label}] rounds={t.rounds} stop={t.stop_reason}")
@@ -174,6 +186,14 @@ def _report(on: TrackResult, off: TrackResult, metric_mode: str = "occupancy") -
                 gain_signals.append(f"★성능 gain★ ON best={bon:.2f}us < OFF best={boff:.2f}us (진화→더 빠른 커널)")
             else:
                 print(f"  ⚠️ 성능 gain 없음 — ON best={bon:.2f}us, OFF best={boff:.2f}us (진화가 더 빠른 커널 못 냄)")
+    elif metric_mode == "thermal":
+        bon, boff = _best_energy(on), _best_energy(off)
+        if bon is not None and boff is not None:
+            if bon < boff:
+                ratio = boff / bon if bon > 0 else float("inf")
+                gain_signals.append(f"★열-gain★ ON best={bon:.6f}J/iter < OFF best={boff:.6f}J/iter ({ratio:.2f}× 개선, 진화→일당 에너지 덜 쓰는 커널)")
+            else:
+                print(f"  ⚠️ 열-gain 없음 — ON best={bon:.6f}J/iter, OFF best={boff:.6f}J/iter")
 
     if gain_signals:
         print("  ✅ gain 신호:")
@@ -185,6 +205,10 @@ def _report(on: TrackResult, off: TrackResult, metric_mode: str = "occupancy") -
     if metric_mode == "latency":
         print("\n⚠️ 경계: 성능 gain = ON best latency < OFF best. variant가 진짜 더 빠른 코드여야")
         print("   곡선 우하향(us↓) 나옴. flat variant(코드 불변)면 곡선 평평 = 성능 gain 안 보임.")
+    elif metric_mode == "thermal":
+        print("\n⚠️ 경계: energy_per_iter_j = power_avg_w × kernel_time_s(ncu 단일실행) —")
+        print("   P3에서 발견된 고정창 energy_j 아티팩트가 없는 일 단위 정규화 지표(설계 §3).")
+        print("   memory-bound 대조군은 즉시 STOP이 정직한 결과(gain 없음이 실패 아님).")
     else:
         print("\n⚠️ 경계: occupancy mode — metric 곡선은 ON/OFF 같을 수 있음(같은 코드 큐).")
         print("   gain은 룰 진화 지표[retire/헛라운드/발화 다양성]. 성능 gain은 --latency로.")
