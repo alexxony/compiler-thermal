@@ -6,6 +6,10 @@ Colab측 watch.py는 별도(GPU 필요, Colab서 작성).
 
 GPU·git·네트워크 없이 테스트: sync_fn(git pull/push)을 주입.
 가짜 우편함 = 로컬 폴더 1개 + no-op sync. self-check가 전체 왕복 검증.
+
+Compiler_Thermal P3 (2026-07-12): GPU-Solver에서 fork. submit()에 kind=None
+파라미터 추가(REQ dict에 "kind" 키 조건부 실림) — colab_profiler.ColabExecProfiler
+와 동일 인터페이스 유지(legacy 경로, 실제 실행은 colab-cli가 대체).
 """
 from __future__ import annotations
 from dataclasses import dataclass

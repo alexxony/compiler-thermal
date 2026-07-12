@@ -11,6 +11,13 @@ runner.MailboxGlue·run_gain_compare 무손상.
 
 원격 전제: Colab 세션에 loop/ 코드가 있어야 함(executor import). setup_remote()가
 `colab upload`로 1회 배포. 세션 수명은 호출자(run_gain_compare)가 colab new/stop 관리.
+
+Compiler_Thermal P3 (2026-07-12): GPU-Solver에서 fork. submit()에 kind 파라미터
+추가(cmd["kind"]로 실림, executor의 "thermal" 분기 트리거). setup_remote에
+thermal=True 옵션 추가 — executor._profile_thermal이 thermal.measure/
+power_sampler를 import하므로, signals/glue/executor 3파일만으론 부족해
+thermal/ 패키지 6파일을 추가로 remote_dir/thermal/에 배포한다(빠뜨리면
+Colab에서 ModuleNotFoundError로 실측이 죽는다 — 실측 전 필수 확인 사항).
 """
 from __future__ import annotations
 from dataclasses import dataclass

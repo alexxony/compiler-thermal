@@ -9,6 +9,13 @@ watch.py는 GPU 0으로 self-check 가능해야 하므로 torch import를 여기
 
 ncu fallback: ncu 권한/부재 시 torch.cuda.Event로 latency만 측정(s1-165 Phase 0).
 signal_dict는 latency_us + weight_pct=1.0만 — 메트릭 축소, 배관은 굴러감.
+
+Compiler_Thermal P3 (2026-07-12): GPU-Solver에서 fork. 기존 execute_request(gate+
+ncu 트래픽만)는 무변경. 새 분기 cmd["kind"]=="thermal" → _profile_thermal 추가:
+ncu 트래픽 런(dram_bytes) + power 런(PowerSampler, 별도 구간)을 **분리 실행**
+(spec §3 — ncu replay 중 전력 왜곡 회피) 후 thermal.measure.merge_signals로
+energy_j/p_hbm_w/p_die_w 합성. Colab 배포 시 thermal/ 패키지도 같이 올려야
+import 성공(colab_profiler.setup_remote(thermal=True)).
 """
 from __future__ import annotations
 from pathlib import Path

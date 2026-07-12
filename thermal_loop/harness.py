@@ -3,6 +3,11 @@
 설계: design spec §2 아키텍처 다이어그램의 데이터 흐름.
 글루(1·2·3)와 내 코드(4·5·6·7)를 엮는다. GPU 없이 FakeGlue로 전체 루프 검증.
 수렴 정지(§3.4): N라운드 개선 없으면 종료 (무한 토큰 방지).
+
+Compiler_Thermal P3 (2026-07-12): GPU-Solver에서 fork. run_loop/evolve 로직
+전부 무변경 — _metric()에 mode="thermal" 한 갈래만 추가(latency 패턴 그대로
+복제, -energy_j 반환). 판정 기준(m>best)이 목적함수만 바뀔 뿐 진화 메커니즘
+자체는 GPU-Solver와 동일. vault: [[03-p3-thermal-gain-design]] §2.
 """
 from __future__ import annotations
 from dataclasses import dataclass

@@ -12,6 +12,10 @@ generate(LLM)는 A 인프라 범위 밖 — FixedGenerator로 고정. 배관(sig
 evolve)이 단일문제로 흐르는지 검증이 목표. 다문제 차별점은 네 문제 오면.
 
 GPU·git 없이 self-check: MailboxProfiler에 no-op sync + fake responder 주입.
+
+Compiler_Thermal P3 (2026-07-12): GPU-Solver에서 fork. run_problem에
+submit_kind 파라미터 추가(기본 None=회귀 0) — "thermal"이면 MailboxGlue가
+매 submit에 kind="thermal" 실어 executor._profile_thermal로 라우팅.
 """
 from __future__ import annotations
 from pathlib import Path

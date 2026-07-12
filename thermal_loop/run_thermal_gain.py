@@ -12,7 +12,14 @@ ON/OFF 두 트랙 공정 비교(run_gain_hypcond와 동일 원칙):
   두 트랙 모두 동일 콜백·동일 variant. 차이는 evolver(retire)에서만.
 
 실행: python run_thermal_gain.py matmul [max_rounds] --colab-cli --session=<name>
-  전제: Colab GPU 세션 + thermal/*.py 업로드(setup_remote 확장 필요, §5).
+  전제: colab_profiler.setup_remote(session, thermal=True)로 thermal/ 패키지까지
+  배포 완료(executor._profile_thermal이 thermal.measure를 import하므로 필수).
+
+로컬 self-check 주의: _run_track이 sync_fn=git_sync를 항상 넘기지만, profiler를
+주입하면(runner.run_problem이 profiler is None일 때만 MailboxProfiler를 만듦)
+sync_fn/mailbox_dir은 완전히 무시된다. self-check 땐 profiler=None으로 두지
+말고 반드시 fake profiler(.submit(code,problem,kind=None) 시그니처)를 넘길 것 —
+안 그러면 존재하지 않는 로컬 git-mailbox로 실제 pull 시도하며 hang한다.
 """
 from __future__ import annotations
 import sys

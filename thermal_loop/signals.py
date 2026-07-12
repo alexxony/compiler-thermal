@@ -7,6 +7,12 @@ GPU 불필요 — CSV/dict in, 정규화 dict out. Colab 프로파일러가 뱉�
 - ncu  = 커널 내부 (왜 느린가): occupancy/load_eff/bw_pct/tensorcore_active.
 - nsys = 타임라인 (어디가 병목): weight_pct(커널 비중), launch_gap(런치 오버헤드).
 - torch profiler = 연산자 귀속 (무엇인가): op_name/op_weight/op_shape (싼 1차 스크리닝).
+
+Compiler_Thermal P3 (2026-07-12): GPU-Solver ~/workspace/gpu_solver_test/loop에서
+그대로 fork. 이 파일 자체 로직은 무변경 — Signal에 열 축 필드(energy_j/p_hbm_w/
+p_die_w/dram_bytes_{read,write})만 추가(아래 표시). rules.py/evolver.py/ledger.py는
+완전 무변경 재사용 — 병목 판정은 그대로, harness._metric(mode="thermal")만
+목적함수를 latency에서 energy로 바꿔 읽는다. vault: [[03-p3-thermal-gain-design]].
 """
 from __future__ import annotations
 from dataclasses import dataclass
