@@ -1,0 +1,382 @@
+"""GPU 실행부 (Colab측) — execute_request 실구현. watch.py가 주입.
+
+설계: docs/03-git-mailbox-runner.md §컴포넌트매핑. cmd["code"](전체 solve.py)
+→ correctness gate(_reference 교차검증) → ncu 프로파일(or Event fallback)
+→ signals.parse_ncu_rows → RES dict.
+
+watch.py와 분리 이유: 우편함 로직(폴링/멱등/git) ≠ GPU 작업(gate/ncu).
+watch.py는 GPU 0으로 self-check 가능해야 하므로 torch import를 여기 격리.
+
+ncu fallback: ncu 권한/부재 시 torch.cuda.Event로 latency만 측정(s1-165 Phase 0).
+signal_dict는 latency_us + weight_pct=1.0만 — 메트릭 축소, 배관은 굴러감.
+"""
+from __future__ import annotations
+from pathlib import Path
+import csv
+import importlib.util
+import io
+import subprocess
+import sys
+import tempfile
+
+# signals는 같은 패키지. ncu CSV → Signal 정규화.
+try:
+    from . import signals
+except ImportError:                      # 스크립트 직접 실행(Colab !python) 대비
+    import signals
+
+# gate 허용오차 fallback — solve.py가 GATE_ATOL/RTOL 안 주면 이거 씀.
+GATE_ATOL = 1e-3
+GATE_RTOL = 1e-3
+
+# ncu가 뽑을 메트릭 = signals.NCU_METRIC_MAP의 키 전부.
+NCU_METRICS = ",".join(signals.NCU_METRIC_MAP.keys())
+
+
+def _load_solve_module(code: str):
+    """cmd['code'](전체 solve.py 텍스트) → 임포트된 모듈. 임시파일 경유.
+
+    solve.py는 import 시 torch.set_float32_matmul_precision 등 전역 설정 실행 →
+    파일로 써서 정상 import. 반환 모듈서 solve/_reference/_make_case/D 꺼냄.
+    """
+    tmp = tempfile.NamedTemporaryFile("w", suffix="_round.py", delete=False)
+    tmp.write(code)
+    tmp.close()
+    spec = importlib.util.spec_from_file_location("_solve_round", tmp.name)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)         # solve.py __main__ 가드 → import 시 실행 안 됨
+    return mod, tmp.name
+
+
+def _gate_sizes(mod) -> tuple:
+    """게이트 크기 목록 — solve.py가 GATE_SIZES 노출하면 그거, 아니면 fallback."""
+    return tuple(getattr(mod, "GATE_SIZES", (1, 4, 128, 2048)))
+
+
+def _atol_rtol(mod) -> tuple[float, float]:
+    return (getattr(mod, "GATE_ATOL", GATE_ATOL),
+            getattr(mod, "GATE_RTOL", GATE_RTOL))
+
+
+def _run_gate(mod) -> tuple[bool, float]:
+    """solve를 reference와 교차검증. (passed, max_abs_err).
+
+    문제-범용 어댑터 계약 (solve.py가 노출):
+      make_case(size, device) -> case      # 입력 묶음 (문제별 임의)
+      run_solve(case, device) -> Tensor    # solve 호출 → output
+      reference(case, device) -> Tensor    # 정답
+    GATE_SIZES 전부 PASS해야 passed=True. 다른 코드 경로라 교차검증 유효.
+    """
+    import torch
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    atol, rtol = _atol_rtol(mod)
+    worst_err = 0.0
+    ok = True
+    for size in _gate_sizes(mod):
+        case = mod.make_case(size, dev)
+        out = mod.run_solve(case, dev)
+        ref = mod.reference(case, dev)
+        err = (out - ref).abs().max().item()
+        worst_err = max(worst_err, err)
+        ok &= torch.allclose(out, ref, atol=atol, rtol=rtol)
+    return ok, worst_err
+
+
+def _profile_ncu(code_path: str) -> dict | None:
+    """ncu로 code_path --profile 실행 → signal_dict. ncu 부재/실패 시 None.
+
+    ncu --csv 출력을 signals.parse_ncu_rows로 정규화. 단일 모듈 가정 →
+    weight_pct=1.0 (전체가 이 커널). 여러 커널이면 후속 harness가 합산.
+    """
+    # --: ncu 플래그 끝 표시 (s2-105: 없으면 --metrics를 실행파일로 오인).
+    # NOTE(2026-06-29): `--launch-count 1` 제거. 커널 1개만 떠서 matmul 등 다커널 워크로드서
+    #   엉뚱한 커널 latency 잡아 TF32 OFF/ON 7.2× 차이를 못 봄(95ms 동률 = 측정 버그). 이제 전체
+    #   커널 측정 → latency_us = 모든 gpu__time_duration.sum 합산(진짜 wall-clock 근사). 다커널이면
+    #   replay 느려지나 정확성 우선. 다른 신호는 parse_ncu_rows(대표 커널) 유지.
+    cmd = [
+        "ncu", "--metrics", NCU_METRICS, "--csv",
+        "--target-processes", "all",
+        "--", sys.executable, code_path, "--profile",
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    rows = _parse_ncu_csv(r.stdout)
+    if not rows:
+        return None
+    sig = signals.parse_ncu_rows(rows)
+    d = {k: getattr(sig, k) for k in signals.Signal.__annotations__}
+    d["weight_pct"] = 1.0
+    # latency = 전체 커널 duration 합산 (parse_ncu_rows는 마지막 행만 → 다커널서 부정확)
+    total_dur = 0.0
+    for row in rows:
+        if "duration" in row.get("Metric Name", "").lower():
+            try:
+                total_dur += float(str(row.get("Metric Value", "0")).replace(",", ""))
+            except ValueError:
+                pass
+    if total_dur > 0:
+        d["latency_us"] = total_dur / 1000.0     # ns → us
+    return d
+
+
+def _parse_ncu_csv(stdout: str) -> list[dict]:
+    """ncu --csv stdout → [{'Metric Name','Metric Value'}, ...].
+
+    ncu csv는 메트릭당 1행, 'Metric Name'/'Metric Value' 컬럼 포함. 헤더 앞에
+    배너 줄이 섞일 수 있어 'Metric Name' 헤더 줄부터 파싱.
+    """
+    lines = stdout.splitlines()
+    start = next((i for i, ln in enumerate(lines) if "Metric Name" in ln), None)
+    if start is None:
+        return []
+    reader = csv.DictReader(io.StringIO("\n".join(lines[start:])))
+    return [row for row in reader if row.get("Metric Name")]
+
+
+def _detect_chip_now() -> str:
+    """실행 중인 GPU → 칩 키. torch.cuda로 cc·이름 뽑아 signals.detect_chip.
+
+    watch/executor가 RES에 실어 드라이버가 --chip 없이 Context 자동 채움(design 07 §미완).
+    GPU/torch 부재(로컬 self-check)면 "" = 가드 통과(회귀 0).
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return ""
+        cc = torch.cuda.get_device_capability()
+        return signals.detect_chip(cc, torch.cuda.get_device_name())
+    except Exception:
+        return ""
+
+
+def _profile_event(mod) -> dict:
+    """ncu fallback — torch.cuda.Event로 latency만. signal_dict 축소.
+
+    A100서 ncu 권한 없을 때(s1-165 Phase 0 fallback). 메트릭은 못 뽑지만
+    latency_us + weight_pct=1.0으로 배관은 굴러감. bw_pct 등은 0(미측정).
+    """
+    import torch
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    size = getattr(mod, "PROFILE_SIZE", _gate_sizes(mod)[-1])
+    case = mod.make_case(size, dev)
+    if dev == "cpu":                     # GPU 없으면 latency 의미 없음
+        return {"latency_us": 0.0, "weight_pct": 1.0}
+    for _ in range(10):                  # warm-up
+        mod.run_solve(case, dev)
+    torch.cuda.synchronize()
+    s, e = torch.cuda.Event(True), torch.cuda.Event(True)
+    s.record()
+    iters = 50
+    for _ in range(iters):
+        mod.run_solve(case, dev)
+    e.record()
+    torch.cuda.synchronize()
+    ms_per = s.elapsed_time(e) / iters
+    return {"latency_us": ms_per * 1000.0, "weight_pct": 1.0}
+
+
+_KGROUP = [                                  # 커널명 패턴 → 그룹 (위→아래 우선)
+    # attention 먼저 — flash 커널명에 cutlass/gemm이 섞여(fmha_cutlassF) matmul로 오분류 방지
+    ("attention",   ("attention", "flash", "fmha", "mha", "sdpa", "scaled_dot")),
+    ("matmul",      ("gemm", "matmul", "cutlass", "ampere_", "sgemm", "wgrad", "s16816", "h16816")),
+    ("elementwise", ("elementwise", "vectorized", "silu", "mul", "add", "rmsnorm", "rope", "copy", "cast")),
+    ("reduction",   ("reduce", "norm", "softmax", "sum")),
+]
+
+
+def _classify_kernel(name: str) -> str:
+    low = name.lower()
+    for group, pats in _KGROUP:
+        if any(p in low for p in pats):
+            return group
+    return "other"
+
+
+def _ncu_breakdown(cmd: dict) -> dict:
+    """전체 forward를 ncu로 떠서 커널 그룹별 duration% 집계.
+
+    _profile_ncu와 달리 --launch-count 제한 없이 모든 커널의
+    gpu__time_duration.sum을 모아 matmul/attention/elementwise/... 로 분류·합산.
+    목적: matmul 비중이 작으면 'TF32 무효 = SDPA flash 지배' 확정 (gain 아닌 원인 규명).
+    """
+    rid = cmd.get("id", "?")
+    code = cmd["code"]
+    _, path = _load_solve_module(code)
+    ncu_cmd = [
+        "ncu", "--metrics", "gpu__time_duration.sum", "--csv",
+        "--target-processes", "all", "--print-kernel-base", "demangled",
+        "--", sys.executable, path, "--profile",
+    ]
+    try:
+        r = subprocess.run(ncu_cmd, capture_output=True, text=True, timeout=600)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return {"id": rid, "passed": False, "signal_dict": {}, "latency_us": 0.0,
+                "max_abs_err": 0.0, "error": f"ncu breakdown failed: {e}"}
+    if r.returncode != 0:
+        return {"id": rid, "passed": False, "signal_dict": {}, "latency_us": 0.0,
+                "max_abs_err": 0.0, "error": f"ncu rc={r.returncode}: {r.stderr[-400:]}"}
+    rows = _parse_ncu_csv(r.stdout)          # [{'Kernel Name','Metric Name','Metric Value'}]
+    groups: dict[str, float] = {}
+    per_kernel: dict[str, float] = {}
+    for row in rows:
+        if "duration" not in row.get("Metric Name", "").lower():
+            continue
+        kname = row.get("Kernel Name") or row.get("ID") or "?"
+        try:
+            dur = float(str(row.get("Metric Value", "0")).replace(",", ""))
+        except ValueError:
+            continue
+        g = _classify_kernel(kname)
+        groups[g] = groups.get(g, 0.0) + dur
+        per_kernel[kname[:60]] = per_kernel.get(kname[:60], 0.0) + dur
+    total = sum(groups.values()) or 1.0
+    pct = {g: round(100.0 * v / total, 2) for g, v in sorted(groups.items(), key=lambda x: -x[1])}
+    top = dict(sorted(per_kernel.items(), key=lambda x: -x[1])[:8])
+    return {"id": rid, "passed": True, "max_abs_err": 0.0, "latency_us": total,
+            "signal_dict": {"group_pct": pct, "total_ns": round(total, 1),
+                            "n_kernels": len(per_kernel), "top_kernels_ns": top},
+            "error": None}
+
+
+def _profile_power(mod, loop_seconds: float = 3.0) -> dict:
+    """전력 런 (Compiler_Thermal P3) — ncu 트래픽 런과 분리 실행(spec §3).
+
+    PROFILE_SIZE 케이스를 loop_seconds 동안 반복하며 PowerSampler로 백그라운드
+    샘플링. probe_matmul.py --loop-seconds 패턴과 동일 — 별도 프로세스가 아니라
+    별도 *실행 구간*으로 분리(같은 executor 호출 내에서 ncu 없이 반복만).
+    """
+    import torch
+    from thermal.power_sampler import PowerSampler, nvml_reader
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if dev == "cpu":
+        return {"avg_power_w": 0.0, "energy_j": 0.0}
+    size = getattr(mod, "PROFILE_SIZE", _gate_sizes(mod)[-1])
+    case = mod.make_case(size, dev)
+    for _ in range(5):
+        mod.run_solve(case, dev)
+    torch.cuda.synchronize()
+
+    sampler = PowerSampler(nvml_reader(), interval_s=0.1)
+    sampler.start()
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < loop_seconds:
+        mod.run_solve(case, dev)
+        torch.cuda.synchronize()
+    result = sampler.stop()
+    return {"avg_power_w": result.avg_power_w, "energy_j": result.energy_j}
+
+
+def _profile_thermal(cmd: dict) -> dict:
+    """열 축 프로파일 (Compiler_Thermal P3) — ncu 트래픽 런 + power 런 분리 후 merge_signals.
+
+    cmd["kind"]=="thermal"일 때 execute_request가 이리로 분기. gate는 execute_request가
+    이미 확인했다고 가정하지 않음 — 이 함수도 자체로 gate 먼저 확인(단독 호출 대비).
+    """
+    from thermal.measure import merge_signals
+
+    rid = cmd.get("id", "?")
+    code = cmd["code"]
+    mod, path = _load_solve_module(code)
+
+    passed, max_err = _run_gate(mod)
+    if not passed:
+        return {"id": rid, "passed": False, "max_abs_err": max_err,
+                "signal_dict": {}, "latency_us": 0.0,
+                "error": f"correctness gate FAIL (max_err={max_err:.2e})"}
+
+    ncu_sig = _profile_ncu(path)
+    if ncu_sig is None:
+        ncu_sig = _profile_event(mod)
+    dram_read = ncu_sig.get("dram_bytes_read", 0.0)
+    dram_write = ncu_sig.get("dram_bytes_write", 0.0)
+    kernel_time_s = ncu_sig.get("latency_us", 0.0) * 1e-6
+
+    chip = _detect_chip_now()
+    power = _profile_power(mod, loop_seconds=cmd.get("loop_seconds", 3.0))
+    thermal_sig = {}
+    if chip and kernel_time_s > 0 and power["avg_power_w"] > 0:
+        thermal_sig = merge_signals(
+            chip=chip,
+            ncu={"dram_bytes_read": dram_read, "dram_bytes_write": dram_write,
+                 "kernel_time_s": kernel_time_s},
+            power=power,
+        )
+
+    sig = {**ncu_sig, **thermal_sig}
+    return {"id": rid, "passed": True, "max_abs_err": max_err,
+            "signal_dict": sig, "latency_us": ncu_sig.get("latency_us", 0.0),
+            "chip": chip, "error": None}
+
+
+def execute_request(cmd: dict) -> dict:
+    """REQ → RES. cmd['code'](전체 solve.py) → gate → 프로파일 → RES dict.
+
+    1. code → 모듈 로드 (전역 설정 실행).
+    2. correctness gate: _reference 교차검증 (GATE_SEQ_LENS 전부 PASS).
+    3. gate FAIL이면 프로파일 스킵 (RES passed=False).
+    4. gate PASS면 ncu 프로파일, 실패 시 Event fallback.
+    5. RES = {id, passed, max_abs_err, signal_dict, latency_us, error}.
+
+    cmd["kind"]=="thermal" (Compiler_Thermal P3) → _profile_thermal로 분기.
+    ncu 트래픽 런 + power 런(별도 구간)을 합쳐 energy_j/p_hbm_w/p_die_w까지 포함.
+
+    예외는 watch.process_pending이 잡아 _error_result로 → infra 실패와 구분.
+    """
+    rid = cmd.get("id", "?")
+    if cmd.get("kind") == "ncu_breakdown":   # 전체 forward 커널 그룹별 비중
+        return _ncu_breakdown(cmd)
+    if cmd.get("kind") == "thermal":         # 열 축 (Compiler_Thermal P3)
+        return _profile_thermal(cmd)
+    code = cmd["code"]
+    mod, path = _load_solve_module(code)
+
+    passed, max_err = _run_gate(mod)
+    if not passed:
+        return {"id": rid, "passed": False, "max_abs_err": max_err,
+                "signal_dict": {}, "latency_us": 0.0,
+                "error": f"correctness gate FAIL (max_err={max_err:.2e})"}
+
+    sig = _profile_ncu(path)
+    if sig is None:                      # ncu 부재/실패 → Event fallback
+        sig = _profile_event(mod)
+    latency = sig.get("latency_us", 0.0)
+    return {"id": rid, "passed": True, "max_abs_err": max_err,
+            "signal_dict": sig, "latency_us": latency,
+            "chip": _detect_chip_now(), "error": None}
+
+
+if __name__ == "__main__":
+    # self-check: GPU/ncu/torch 없이 도는 부분만 — CSV 파싱 + ncu-None 분기.
+    # gate(_run_gate)·Event 타이밍은 torch 필요 → Colab 실라운드서 검증.
+
+    # 1. ncu CSV 파싱: 배너 줄 + 헤더 혼재 → Metric 행만 추출
+    csv_out = (
+        '==PROF== banner line\n'
+        '"ID","Metric Name","Metric Value"\n'
+        '"0","gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed","83.0"\n'
+        '"0","gpu__time_duration.sum","857000"\n'
+    )
+    rows = _parse_ncu_csv(csv_out)
+    assert len(rows) == 2, rows
+    s = signals.parse_ncu_rows(rows)
+    assert abs(s.bw_pct - 0.83) < 1e-9, s.bw_pct
+    assert s.latency_us == 857000.0, s.latency_us
+
+    # 2. 빈/헤더없는 출력 → 빈 리스트
+    assert _parse_ncu_csv("garbage\nno header here") == []
+
+    # 3. ncu 부재/파일없음 → None (Event fallback 트리거)
+    assert _profile_ncu("/nonexistent_xyz.py") is None
+
+    # 4. NCU_METRICS = 매핑 키 전부 (ncu 호출 인자 무결성)
+    assert "gpu__time_duration.sum" in NCU_METRICS
+    assert NCU_METRICS.count(",") == len(signals.NCU_METRIC_MAP) - 1
+
+    print("executor.py self-check PASS (CSV파싱·ncu-None분기. gate/Event는 Colab torch로)")
