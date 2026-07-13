@@ -29,7 +29,7 @@ run_gain_round(2라운드 1점) → N라운드 + ON/OFF 비교로 확장한 본 
 from __future__ import annotations
 import sys
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from runner import run_problem
 from ledger import Ledger
@@ -48,6 +48,13 @@ class TrackResult:
     retire_count: int            # 폐기 이벤트 수 (ON만 >0 가능)
     stop_reason: str
     rounds: int
+    # P6(06-p6-signal-provenance-design): 라운드별 signal_dict 원본 — retire 등
+    # 룰 발화의 인과 근거 재확인용. gate_fail 라운드는 {}(빈 dict)가 그대로 들어옴
+    # (harness.py의 RoundRecord(..., {}, "gate_fail", ...)) — 소비측이 방어적으로
+    # 다뤄야 함(예: signal.get("load_eff") 등, 직접 인덱싱 금지).
+    # 구버전 __ABL_RESULT__ JSON(P5 이전, "signals" 키 없음)과의 하위호환을 위해
+    # 기본값 빈 리스트.
+    signals: list = field(default_factory=list)
 
 
 # canary raw_script — Colab watch서 GPU 칩 자동탐지. detect_chip 재사용(중복 로직 0).

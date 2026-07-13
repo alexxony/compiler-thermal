@@ -119,6 +119,10 @@ def _run_track(problem, seed_code, variant_map, max_rounds, evolve_enabled,
         "retire_count": sum(1 for e in res.events if e.kind == "retire"),
         "stop_reason": res.stopped_reason,
         "rounds": res.rounds,
+        # P6: signal_dict 라운드별 보존 (추출 방식, 06-p6-signal-provenance-design §2-3).
+        # gate_fail 라운드는 r.signal={}(harness.py의 RoundRecord(..., {}, "gate_fail", ...))
+        # 그대로 실림 — 소비측(역직렬화/판정)이 빈 dict를 방어적으로 다뤄야 함.
+        "signals": [r.signal for r in recs],
     }
 
 
@@ -294,9 +298,11 @@ def _fetch_result_file(session: str) -> dict | None:
 
 
 def _to_track(d: dict) -> TrackResult:
+    # P6: "signals" 키는 06-p6-signal-provenance-design 이후 __ABL_RESULT__에
+    # 새로 실림 — 그 이전 로그(P5 이전) 역직렬화 시 하위호환으로 빈 리스트.
     return TrackResult(d["label"], [tuple(x) for x in d["metric_curve"]],
                        d["fired_rules"], d["wasted_rounds"], d["retire_count"],
-                       d["stop_reason"], d["rounds"])
+                       d["stop_reason"], d["rounds"], d.get("signals", []))
 
 
 def main() -> int:
@@ -338,8 +344,43 @@ def main() -> int:
                 f"오염될 위험. 위 경고 참조.")
         print("  TF32 가드 체크: 전 문제 통과 (행렬곱 reference 전부 allow_tf32 방어 확인)")
 
+        # P6(06-p6-signal-provenance-design Task 24) — 가짜 신호로 signals 추출
+        # 왕복 확인. torch·colab 불요, ledger.py는 순수 파이썬이라 실제 _run_track
+        # 내부 로직(led.records에서 signal 뽑아 반환 dict에 담는 부분)을 직접
+        # 재현해 검증한다 — "배선이 살아있다"를 A100 스펜드 전에 로컬로 증명.
+        from ledger import Ledger, RoundRecord
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "abl-selfcheck.jsonl"
+            led = Ledger(p)
+            # 비-기본값 신호(load_eff=0.5, 팀리드 지적대로 0.0 기본값과 구분되는
+            # 값 사용) + gate_fail 빈 dict 혼재 — P5 1차 로그(gate_fail 연속) 재현.
+            led.append(RoundRecord("selfcheck_p", 0, "h0", {}, "gate_fail",
+                                   "correctness 실패", -1, -1.0, False, False))
+            led.append(RoundRecord("selfcheck_p", 1, "h1",
+                                   {"load_eff": 0.5, "occupancy": 0.4},
+                                   "uncoalesced", "메모리 비합착", 4, 0.03,
+                                   True, True))
+            recs = [r for r in led.records if r.problem == "selfcheck_p"]
+            signals = [r.signal for r in recs]
+            assert signals == [{}, {"load_eff": 0.5, "occupancy": 0.4}], (
+                f"signals 추출 불일치: {signals}")
+            # __ABL_RESULT__ 이 결과 dict를 JSON 직렬화하는 경로까지 확인.
+            fake_result = {"label": "evolve_ON", "metric_curve": [(0, -1.0), (1, 0.03)],
+                           "fired_rules": [r.hypothesis_label for r in recs],
+                           "wasted_rounds": 0, "retire_count": 0,
+                           "stop_reason": "stop_label", "rounds": 2,
+                           "signals": signals}
+            round_tripped = json.loads(json.dumps(fake_result, ensure_ascii=False))
+            track = _to_track(round_tripped)
+            assert track.signals[1]["load_eff"] == 0.5, (
+                "TrackResult.signals 왕복 후 load_eff 값 유실")
+            assert track.signals[0] == {}, "gate_fail 빈 dict가 왕복 중 변형됨"
+        print("  signal_dict 왕복 체크: PASS (gate_fail 빈 dict + 비기본값 신호 "
+              "혼재 케이스 포함)")
+
         print("run_ablation_remote.py self-check PASS (원격 드라이버 생성·컴파일 OK, "
-              "thermal 축+3문제 variant map 포함, TF32 가드 체크 포함)")
+              "thermal 축+3문제 variant map 포함, TF32 가드 체크 포함, "
+              "signal_dict 왕복 체크 포함)")
         return 0
 
     session = None
