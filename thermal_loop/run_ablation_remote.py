@@ -14,8 +14,17 @@ LLM 대행 generate가 필요한 run_gain_round는 범위 밖(왕복 필수) —
 
 실행: python3 run_ablation_remote.py <problem>[,<problem>...] [max_rounds] --session=<s>
       [--skip-upload]  (모듈 이미 배포된 세션 재사용 시)
+      [--resume=<prev_result.json>]  (P8 Task 34 — 완결 문제 skip, 잔여만 재실행)
       [--selfcheck]    (GPU·colab 0 — 원격 드라이버 생성·컴파일 검증만)
 variant 규약은 run_gain_hypcond와 동일: matmul=R_tf32on, 그 외=R_tf32+R_coalesced.
+
+P8 Task 33(§4-1) — 결과 회수는 `/content/abl_result.json` 파일 다운로드가 주 경로
+(대규모 35~200문제서 signals 포함 시 단일 stdout 라인이 truncate될 위험 — §4-1 표
+"결과 전송" 지점). stdout `__ABL_RESULT__` 파싱은 파일 회수 실패 시 폴백으로만.
+P8 Task 34 — `--resume=` 지정 시 이전 배치 결과 JSON에서 완결(off+on 모두 존재)
+문제를 호출 전 필터링(`filter_uncompleted`) — 배치 세션사 후 재실행 시 완료분
+재계산 방지. `merge_batch_results`로 여러 배치 결과 JSON을 문제 단위 병합 가능
+(report_p8_stats.py 등 리포터 입력 준비용).
 """
 from __future__ import annotations
 import ast
@@ -27,6 +36,9 @@ from pathlib import Path
 
 from run_e2e import PROBLEMS
 from run_gain_compare import TrackResult, _report
+
+# P8 Task 33/34 (08-p8-scale-ablation-design.md §4-1) — 대규모 배치 내구성.
+# 신규 인프라 없음: 기존 _fetch_result_file/ledger 배선 위에 얇은 래퍼만 추가.
 
 LOOP_DIR = Path(__file__).resolve().parent
 THERMAL_DIR = LOOP_DIR.parent / "thermal"
@@ -297,6 +309,50 @@ def _fetch_result_file(session: str) -> dict | None:
     return None
 
 
+def completed_problems_from_result(result_path: Path) -> set[str]:
+    """P8 Task 34 재개 로직 — 배치 결과 JSON에서 **완결**(off+on 둘 다 존재) 문제만 추출.
+
+    §4-1 재개 규칙: off만 있고 on이 없는 등 부분 완료는 skip 대상 아님(전량 재실행 —
+    부분 트랙만 이어 돌리는 반쪽 재개는 신뢰도 위험, P5 §4 안전망 계승 정직한 보수적 선택).
+    파일 없으면 빈 집합(신규 배치, 회귀 0).
+    """
+    result_path = Path(result_path)
+    if not result_path.exists():
+        return set()
+    try:
+        data = json.loads(result_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return set()
+    done = set()
+    for name, tracks in (data.get("results") or {}).items():
+        if "off" in tracks and "on" in tracks:
+            done.add(name)
+    return done
+
+
+def filter_uncompleted(problems: list[str], done: set[str]) -> list[str]:
+    """P8 Task 34 — done 집합에 있는 문제를 배치 대상에서 제외(순서 보존)."""
+    return [p for p in problems if p not in done]
+
+
+def merge_batch_results(batch_result_paths: list[Path]) -> dict:
+    """P8 Task 33/34 — 여러 배치 결과 JSON을 문제 단위로 병합.
+
+    같은 문제가 여러 배치 파일에 있으면(재개로 재실행된 경우 등) **나중 경로가 우선**
+    (리스트 순서 = 최신순 가정, 호출측이 mtime 등으로 정렬해 전달). chip은 마지막 값 채택.
+    """
+    merged: dict = {"chip": "", "results": {}}
+    for p in batch_result_paths:
+        p = Path(p)
+        if not p.exists():
+            continue
+        data = json.loads(p.read_text())
+        if data.get("chip"):
+            merged["chip"] = data["chip"]
+        merged["results"].update(data.get("results") or {})
+    return merged
+
+
 def _to_track(d: dict) -> TrackResult:
     # P6: "signals" 키는 06-p6-signal-provenance-design 이후 __ABL_RESULT__에
     # 새로 실림 — 그 이전 로그(P5 이전) 역직렬화 시 하위호환으로 빈 리스트.
@@ -387,6 +443,7 @@ def main() -> int:
     gpu = None
     metric_mode = "latency"
     skip_upload = "--skip-upload" in argv
+    resume_path = None
     rest = []
     for a in argv:
         if a.startswith("--session="):
@@ -395,15 +452,29 @@ def main() -> int:
             gpu = a.split("=", 1)[1]
         elif a.startswith("--metric="):
             metric_mode = a.split("=", 1)[1]
+        elif a.startswith("--resume="):
+            # P8 Task 34 — 이 경로의 배치 결과 JSON에서 완결(off+on) 문제를 skip.
+            resume_path = a.split("=", 1)[1]
         elif a not in ("--skip-upload",):
             rest.append(a)
     if not session or not rest:
         print("usage: run_ablation_remote.py <p1>[,<p2>...] [max_rounds] "
               "--session=<s> [--gpu=A100] [--metric=thermal] [--skip-upload] "
-              "[--selfcheck]", file=sys.stderr)
+              "[--resume=<prev_result.json>] [--selfcheck]", file=sys.stderr)
         return 2
     problems = rest[0].split(",")
     max_rounds = int(rest[1]) if len(rest) > 1 else 8
+
+    if resume_path:
+        done = completed_problems_from_result(Path(resume_path))
+        remaining = filter_uncompleted(problems, done)
+        if done:
+            print(f"[resume] {resume_path}: 완결 {sorted(done)} skip, "
+                  f"잔여 {remaining}")
+        if not remaining:
+            print("[resume] 잔여 문제 없음 — 배치 전량 완료 상태, exec 생략")
+            return 0
+        problems = remaining
 
     driver_src = _build_remote_driver(problems, max_rounds, metric_mode=metric_mode)
     total_rounds = len(problems) * 2 * max_rounds
@@ -435,21 +506,33 @@ def main() -> int:
 
         print(f"[launch] 문제 {problems} × ON/OFF × {max_rounds}R — "
               f"colab exec 1방 (timeout {timeout:.0f}s, attempt {attempt})")
+        exec_rc = None
         try:
             p = _colab(["colab", "exec", "-s", session, "-f", path,
                         "--timeout", str(timeout)], timeout + 120)
             sys.stdout.write(p.stdout)
+            exec_rc = p.returncode
             if p.returncode != 0:
                 print(f"[warn] exec rc={p.returncode}: {p.stderr[-400:]}",
                       file=sys.stderr)
-            for ln in reversed(p.stdout.splitlines()):
-                if ln.startswith("__ABL_RESULT__"):
-                    result = json.loads(ln[len("__ABL_RESULT__"):])
-                    break
         except subprocess.TimeoutExpired:
             print("[warn] 전송 타임아웃 — 원격 결과 파일 회수 시도", file=sys.stderr)
-        if result is None:
-            result = _fetch_result_file(session)
+
+        # P8 Task 33(§4-1) — 파일 다운로드를 주 경로로 승격. 대규모 문제(35~200)면
+        # signals 포함 결과가 단일 stdout 라인 캡을 넘어 __ABL_RESULT__ 파싱이
+        # truncate될 수 있음(P5/P7 소규모에선 무해했으나 규모 확장의 파괴 지점,
+        # 설계 §4-1 표). exec 성공 여부와 무관하게 파일부터 회수 시도.
+        result = _fetch_result_file(session)
+        if result is None and exec_rc == 0:
+            # 파일 회수 실패했는데 exec 자체는 성공했으면 stdout 라인 파싱 폴백
+            # (구세션·소규모 배치 하위호환 — 파일 미기록 구버전 드라이버 대비).
+            for ln in reversed(p.stdout.splitlines()):
+                if ln.startswith("__ABL_RESULT__"):
+                    try:
+                        result = json.loads(ln[len("__ABL_RESULT__"):])
+                    except json.JSONDecodeError:
+                        result = None
+                    break
         if result is not None:
             break
     if result is None:
