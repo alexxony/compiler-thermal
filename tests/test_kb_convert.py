@@ -17,6 +17,8 @@ from kb_convert import (  # noqa: E402
     convert_to_solve_source,
     op_pattern_bucket,
     variant_map_for_bucket,
+    convert_problem_file,
+    convert_problem_batch,
 )
 
 _KB_MATMUL_SRC = '''
@@ -201,3 +203,141 @@ def test_variant_map_for_bucket_non_matmul_is_tf32_plus_coalesced():
     assert vm == {"R_tf32.py", "R_coalesced.py"}
     vm2 = variant_map_for_bucket("memory-norm")
     assert vm2 == {"R_tf32.py", "R_coalesced.py"}
+
+
+# ── 갭 보완(팀리드 지적, 2026-07-14) — convert_problem_file: 실제 problems/ 파일 생성 ──
+# 기존 convert_to_solve_source는 KBProblem→텍스트 순수함수뿐, 디스크 쓰기 경로가 없어
+# p8-measure가 그대로 쓸 수 있는 산출물이 없었음(kb_convert.py:234 주석이 참조하는
+# convert_problem_file이 실제로는 미구현). 아래는 이 갭을 메우는 파일-쓰기 드라이버.
+
+def test_convert_to_solve_source_stateful_injects_real_init_body_not_pass_stub():
+    # 회귀 확인: 최초 구현은 stateful 모델의 __init__ 본문을 "pass" 스텁으로 남겨뒀음
+    # (골격만 생성, 실제 nn.Linear 등 계층 선언이 유실 — correctness 결함).
+    kb = parse_kb_source(_KB_LINEAR_SRC, name="12_Gemm_Multiply_LeakyReLU")
+    src = convert_to_solve_source(kb, problem_name="kbnew_linear")
+    assert "nn.Linear" in src  # 원본 __init__ 본문(self.gemm = nn.Linear(...))이 실제로 이식됨
+    assert "pass  # __init__ body injected" not in src  # 스텁 잔재 없음
+
+
+def test_convert_problem_file_writes_solve_py_under_problems_root(tmp_path):
+    kb = parse_kb_source(_KB_MATMUL_SRC, name="1_Square_matrix_multiplication_")
+    out_dir = convert_problem_file(kb, problems_root=tmp_path, problem_name="kbnew_matmul")
+    solve_path = tmp_path / "kbnew_matmul" / "solve.py"
+    assert solve_path.exists()
+    assert out_dir == tmp_path / "kbnew_matmul"
+    tree = ast.parse(solve_path.read_text())
+    funcs = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert {"make_case", "run_solve", "reference"} <= funcs
+
+
+def test_convert_problem_file_matmul_bucket_writes_r_tf32on_variant(tmp_path):
+    kb = parse_kb_source(_KB_MATMUL_SRC, name="1_Square_matrix_multiplication_")
+    convert_problem_file(kb, problems_root=tmp_path, problem_name="kbnew_matmul")
+    variant_path = tmp_path / "kbnew_matmul" / "variants" / "R_tf32on.py"
+    assert variant_path.exists()
+    vsrc = variant_path.read_text()
+    assert "allow_tf32 = True" in vsrc
+    ast.parse(vsrc)  # 문법 유효
+
+
+def test_convert_problem_file_non_matmul_bucket_writes_r_tf32_variant(tmp_path):
+    kb = parse_kb_source(_KB_LINEAR_SRC, name="12_Gemm_Multiply_LeakyReLU")
+    convert_problem_file(kb, problems_root=tmp_path, problem_name="kbnew_linear")
+    variant_path = tmp_path / "kbnew_linear" / "variants" / "R_tf32.py"
+    assert variant_path.exists()
+    ast.parse(variant_path.read_text())
+
+
+def test_convert_problem_file_no_matmul_no_variants_dir_needed(tmp_path):
+    kb = parse_kb_source(_KB_SOFTMAX_SRC, name="23_Softmax")
+    convert_problem_file(kb, problems_root=tmp_path, problem_name="kbnew_softmax")
+    solve_path = tmp_path / "kbnew_softmax" / "solve.py"
+    assert solve_path.exists()
+    # non-matmul 문제는 TF32 variant가 무의미 — variants/ 디렉토리 자체가 없어도 됨
+    # (run_ablation_remote._variant_map_for가 없는 파일은 자연스럽게 스킵).
+
+
+def test_convert_problem_file_written_solve_py_passes_tf32_guard_check(tmp_path):
+    # run_ablation_remote.check_tf32_guard와 동일한 검사를 직접 재현 — 파일로 써도
+    # allow_tf32 방어가 살아있는지 확인(가드 로직 자체는 run_ablation_remote 소관,
+    # 여기선 산출물이 그 검사를 통과할 형태인지만 검증).
+    kb = parse_kb_source(_KB_MATMUL_SRC, name="1_Square_matrix_multiplication_")
+    out_dir = convert_problem_file(kb, problems_root=tmp_path, problem_name="kbnew_matmul")
+    solve_src = (out_dir / "solve.py").read_text()
+    tree = ast.parse(solve_src)
+    uses_matmul = any(
+        isinstance(n, ast.FunctionDef) and n.name == "reference"
+        and any(isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.MatMult)
+                or (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr in ("matmul", "bmm", "mm"))
+                for sub in ast.walk(n))
+        for n in tree.body
+    )
+    assert uses_matmul
+    assert "allow_tf32" in solve_src
+
+
+def test_convert_problem_batch_writes_multiple_problems(tmp_path):
+    kbs = [
+        parse_kb_source(_KB_MATMUL_SRC, name="1_Square_matrix_multiplication_"),
+        parse_kb_source(_KB_SOFTMAX_SRC, name="23_Softmax"),
+        parse_kb_source(_KB_LINEAR_SRC, name="12_Gemm_Multiply_LeakyReLU"),
+    ]
+    names = ["kbnew_matmul", "kbnew_softmax", "kbnew_linear"]
+    written = convert_problem_batch(list(zip(kbs, names)), problems_root=tmp_path)
+    assert len(written) == 3
+    for n in names:
+        assert (tmp_path / n / "solve.py").exists()
+
+
+def test_convert_problem_batch_reports_errors_without_aborting(tmp_path):
+    # 문제 하나가 파싱 불가(예: Model 클래스 없음)라도 나머지는 계속 처리 —
+    # 35문제 배치 중 1개 실패로 전체가 죽지 않게(정직한 부분 성공 보고).
+    good_kb = parse_kb_source(_KB_MATMUL_SRC, name="1_Square_matrix_multiplication_")
+    bad_kb = KBProblem(name="broken", forward_src="return x + y", forward_args=["x", "y"],
+                       init_args=[], init_body_src="", init_inputs_src="[]",
+                       get_inputs_src="not valid python (((", module_body_src="",
+                       stateful=False)
+    written = convert_problem_batch(
+        [(good_kb, "kbnew_good"), (bad_kb, "kbnew_bad")], problems_root=tmp_path)
+    assert (tmp_path / "kbnew_good" / "solve.py").exists()
+    # bad_kb는 get_inputs_src가 문법 오류라 컴파일이 실패해야 함 — written 목록에서 제외되거나
+    # 에러로 기록되어야 정직(조용히 깨진 파일을 쓰면 안 됨).
+    good_names = {name for name, ok, _ in written if ok}
+    bad_names = {name for name, ok, _ in written if not ok}
+    assert "kbnew_good" in good_names
+    assert "kbnew_bad" in bad_names
+
+
+def test_generated_solve_py_passes_real_run_ablation_remote_guard_check(tmp_path):
+    """교차모듈 회귀 잠금 — run_ablation_remote.check_tf32_guard(실제 정적 가드)를
+    kb_convert 산출물에 직접 실행. 이전 버그(2026-07-14 2차 갭): reference()가
+    run_solve()로 위임하면 _reference_uses_matmul이 matmul 호출을 못 찾아 가드가
+    조용히 무력화됨(경고 0인데 실제론 미방어) — 이 테스트가 그 회귀를 원천 차단.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "thermal_loop"))
+    import run_ablation_remote as rar  # noqa: E402
+
+    kb = parse_kb_source(_KB_MATMUL_SRC, name="1_Square_matrix_multiplication_")
+    out_dir = convert_problem_file(kb, problems_root=tmp_path, problem_name="kbnew_matmul")
+
+    original_problems = rar.PROBLEMS
+    try:
+        rar.PROBLEMS = tmp_path
+        warning = rar.check_tf32_guard("kbnew_matmul")
+    finally:
+        rar.PROBLEMS = original_problems
+    assert warning is None, f"TF32 가드가 산출물에서 경고를 냄(방어 실패): {warning}"
+
+    # 역방향 확인: reference()에서 allow_tf32 문자열을 강제로 지우면 가드가 반드시
+    # 경고를 내야 함(가드 자체가 무력화된 게 아니라 정말 통과한 건지 대조).
+    solve_path = out_dir / "solve.py"
+    stripped = solve_path.read_text().replace("allow_tf32", "ALLOW_TF32_REMOVED")
+    solve_path.write_text(stripped)
+    try:
+        rar.PROBLEMS = tmp_path
+        warning2 = rar.check_tf32_guard("kbnew_matmul")
+    finally:
+        rar.PROBLEMS = original_problems
+    assert warning2 is not None, "allow_tf32 제거했는데도 가드가 경고를 안 냄 — 가드 자체가 무력"
