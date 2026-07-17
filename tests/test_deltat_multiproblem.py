@@ -245,3 +245,110 @@ def test_four_problem_report_has_all_sections():
     for name in ("matmul", "kb_matmul_scalar", "batched_gemm", "kb_softmax"):
         assert name in report
     assert "null" in report.lower()
+
+
+# --- HBM_build P2 Task 4: rc_kw A/B 인터페이스 ------------------------------
+# design: /mnt/c/ObsidianVault/HBM_build/docs/06-p2-rc-backport-design.md Task 4.
+# RcBackend 클래스(thermal/twin_eval.py)는 무변경 — A/B는 이 모듈의 rc_kw 딕셔너리
+# 선택으로만 구현. LEGACY는 P4 기준선(ΔT 17.16K)과 반드시 일치해야 한다(회귀 고정).
+
+
+def test_rc_kw_legacy_is_default_and_matches_make_backend():
+    """RC_KW_LEGACY가 test_twin_eval.make_backend()와 동일한 5개 값이어야 한다."""
+    assert rp.RC_KW_LEGACY == dict(
+        r_die_hbm=0.5, r_die_sink=0.15, r_hbm_sink=0.8,
+        c_die=50.0, c_hbm=10.0, t_ambient=45.0,
+    )
+    # 하위호환 별칭 RC_KW도 동일 객체(기존 코드/테스트 무손상).
+    assert rp.RC_KW is rp.RC_KW_LEGACY
+
+
+def test_matmul_anchor_regression_explicit_legacy_set():
+    """LEGACY 세트를 명시 전달해도 P4 기준선(ΔT 17.16K)이 그대로 재현된다.
+
+    회귀 고정: run_problem(cfg)의 기본 rc_kw와 rc_kw=RC_KW_LEGACY 명시 호출이
+    완전히 동일한 결과를 내야 한다(A/B 인터페이스 도입이 기본 경로를 바꾸지 않음).
+    """
+    cfg = next(c for c in rp.PROBLEM_CONFIGS if c["problem"] == "matmul")
+    res_default = rp.run_problem(cfg)
+    res_explicit = rp.run_problem(cfg, rc_kw=rp.RC_KW_LEGACY)
+    assert res_default["b_seed_t"] == pytest.approx(res_explicit["b_seed_t"])
+    assert res_default["b_best_t"] == pytest.approx(res_explicit["b_best_t"])
+    gap = res_explicit["b_seed_t"] - res_explicit["b_best_t"]
+    assert gap == pytest.approx(17.16, abs=0.5)
+    assert res_explicit["rc_kw_label"] == "LEGACY"
+
+
+def test_rc_kw_hbm_fem_die_side_unchanged_from_legacy():
+    """RC_KW_HBM_FEM: die 쪽 3개(r_die_hbm/r_die_sink/c_die)는 legacy 값 유지.
+
+    설계 §2 스코프 결정 — HBM_build FEM은 HBM 스택만 모델하므로 교체 가능한
+    파라미터는 r_hbm_sink·c_hbm 2개뿐.
+    """
+    for key in ("r_die_hbm", "r_die_sink", "c_die", "t_ambient"):
+        assert rp.RC_KW_HBM_FEM[key] == rp.RC_KW_LEGACY[key]
+
+
+def test_rc_kw_hbm_fem_hbm_side_differs_from_legacy_or_is_placeholder():
+    """RC_KW_HBM_FEM의 r_hbm_sink/c_hbm은 legacy와 다른 값(FEM 로드 성공)이거나,
+    T2 미완료 시 placeholder(None)여야 한다 — 조용히 legacy로 값이 새면 안 된다.
+    """
+    r_hbm_sink = rp.RC_KW_HBM_FEM["r_hbm_sink"]
+    c_hbm = rp.RC_KW_HBM_FEM["c_hbm"]
+    if r_hbm_sink is None:
+        assert c_hbm is None  # T2 대기 placeholder
+        assert "PLACEHOLDER" in rp.RC_KW_HBM_FEM["_fem_source"]
+    else:
+        assert r_hbm_sink != rp.RC_KW_LEGACY["r_hbm_sink"]
+        assert c_hbm != rp.RC_KW_LEGACY["c_hbm"]
+
+
+def test_rc_kw_set_label_identifies_legacy_and_hbm_fem():
+    """rc_kw_set_label이 두 표준 세트를 정확히 구분한다."""
+    assert rp.rc_kw_set_label(rp.RC_KW_LEGACY) == "LEGACY"
+    assert rp.rc_kw_set_label(rp.RC_KW_HBM_FEM) == "HBM_FEM"
+    assert rp.rc_kw_set_label(dict(rp.RC_KW_LEGACY)) == "CUSTOM"  # 별개 dict
+
+
+def test_load_hbm_fem_rc_params_missing_file_raises_clear_error(tmp_path):
+    """CSV 부재 시 조용히 넘어가지 않고 FileNotFoundError로 명확히 실패한다."""
+    missing = tmp_path / "does_not_exist.csv"
+    with pytest.raises(FileNotFoundError, match="HBM_build P2 T2"):
+        rp.load_hbm_fem_rc_params(missing)
+
+
+def test_load_hbm_fem_rc_params_reads_real_csv_when_present():
+    """T2 산출물 rc_params.csv가 있으면 r_hbm_sink·c_hbm을 실값으로 읽는다."""
+    if not rp.HBM_RC_PARAMS_CSV.exists():
+        pytest.skip("HBM_build T2 rc_params.csv 아직 없음 — placeholder 경로만 검증됨")
+    params = rp.load_hbm_fem_rc_params()
+    assert set(params) == {"r_hbm_sink", "c_hbm"}
+    assert params["r_hbm_sink"] > 0
+    assert params["c_hbm"] > 0
+
+
+def test_run_problem_hbm_fem_set_produces_different_gap_from_legacy():
+    """HBM_FEM 세트가 실값 로드에 성공한 경우 LEGACY와 다른 ΔT gap을 낸다
+    (파라미터 교체가 실제로 계산에 반영됨을 확인 — A/B 대비의 최소 요건).
+    """
+    if rp.RC_KW_HBM_FEM["r_hbm_sink"] is None:
+        pytest.skip("HBM_FEM 세트가 placeholder(T2 대기) — 대비 계산 skip")
+    cfg = next(c for c in rp.PROBLEM_CONFIGS if c["problem"] == "matmul")
+    res_legacy = rp.run_problem(cfg, rc_kw=rp.RC_KW_LEGACY)
+    res_fem = rp.run_problem(cfg, rc_kw=rp.RC_KW_HBM_FEM)
+    gap_legacy = res_legacy["b_seed_t"] - res_legacy["b_best_t"]
+    gap_fem = res_fem["b_seed_t"] - res_fem["b_best_t"]
+    assert gap_fem != pytest.approx(gap_legacy, abs=1e-9)
+    assert res_fem["rc_kw_label"] == "HBM_FEM"
+
+
+def test_build_report_labels_rc_kw_set_in_header_and_sections():
+    """리포트 헤더 + 문제별 섹션에 rc_kw 세트 라벨이 명시된다(Task 4 요구사항)."""
+    cfg = next(c for c in rp.PROBLEM_CONFIGS if c["problem"] == "matmul")
+    report_legacy = rp.build_report([cfg], rc_kw=rp.RC_KW_LEGACY)
+    assert "rc_kw 세트: LEGACY" in report_legacy
+    assert "[rc_kw=LEGACY]" in report_legacy
+
+    report_fem = rp.build_report([cfg], rc_kw=rp.RC_KW_HBM_FEM)
+    assert "rc_kw 세트: HBM_FEM" in report_fem
+    assert "[rc_kw=HBM_FEM]" in report_fem
