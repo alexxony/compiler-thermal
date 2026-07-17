@@ -309,8 +309,21 @@ def _fetch_result_file(session: str) -> dict | None:
     return None
 
 
+def completed_problems_from_result_dict(data: dict) -> set[str]:
+    """배치 결과 dict에서 **완결**(off+on 둘 다 존재) 문제만 추출.
+
+    P8 Task 36 이상 징후 4 — main()이 부분 결과(요청 문제 중 일부만 기록)를
+    완료로 오판해 exit 0을 반환한 사고 재발 방지용 완결성 검증에도 재사용.
+    """
+    done = set()
+    for name, tracks in (data.get("results") or {}).items():
+        if "off" in tracks and "on" in tracks:
+            done.add(name)
+    return done
+
+
 def completed_problems_from_result(result_path: Path) -> set[str]:
-    """P8 Task 34 재개 로직 — 배치 결과 JSON에서 **완결**(off+on 둘 다 존재) 문제만 추출.
+    """P8 Task 34 재개 로직 — 배치 결과 JSON 파일에서 완결 문제만 추출.
 
     §4-1 재개 규칙: off만 있고 on이 없는 등 부분 완료는 skip 대상 아님(전량 재실행 —
     부분 트랙만 이어 돌리는 반쪽 재개는 신뢰도 위험, P5 §4 안전망 계승 정직한 보수적 선택).
@@ -323,11 +336,7 @@ def completed_problems_from_result(result_path: Path) -> set[str]:
         data = json.loads(result_path.read_text())
     except (json.JSONDecodeError, OSError):
         return set()
-    done = set()
-    for name, tracks in (data.get("results") or {}).items():
-        if "off" in tracks and "on" in tracks:
-            done.add(name)
-    return done
+    return completed_problems_from_result_dict(data)
 
 
 def filter_uncompleted(problems: list[str], done: set[str]) -> list[str]:
@@ -533,10 +542,26 @@ def main() -> int:
                     except json.JSONDecodeError:
                         result = None
                     break
+        # P8 Task 36 이상 징후 4 — 부분 결과(요청 문제 중 일부만 기록)를 완료로
+        # 오판하지 않도록 완결성 검증. off+on 둘 다 있어야 그 문제는 "완료"로 인정
+        # (completed_problems_from_result과 동일 기준). 미완이면 attempt 2로 재시도.
+        missing = []
         if result is not None:
+            missing = [p for p in problems
+                       if p not in completed_problems_from_result_dict(result)]
+        if result is not None and not missing:
             break
+        if missing:
+            print(f"[warn] 부분 결과 — 누락 {missing} (attempt {attempt}/2)",
+                  file=sys.stderr)
     if result is None:
         print("ERR: 결과 회수 실패 (stdout·파일·재생성 재시도 전부)", file=sys.stderr)
+        return 1
+    missing = [p for p in problems
+               if p not in completed_problems_from_result_dict(result)]
+    if missing:
+        print(f"ERR: 결과 불완전 — 요청 {len(problems)}문제 중 누락 {missing} "
+              f"(재생성 재시도 후에도 미해소)", file=sys.stderr)
         return 1
 
     print(f"\n[chip={result.get('chip')!r}]")
