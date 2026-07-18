@@ -9,10 +9,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "thermal_loop"))
 
 from run_ablation_remote import (  # noqa: E402
+    check_metric_mode_compat,
     completed_problems_from_result,
     completed_problems_from_result_dict,
     filter_uncompleted,
     merge_batch_results,
+    _build_remote_driver,
     _to_track,
 )
 
@@ -132,3 +134,31 @@ def test_merge_batch_results_roundtrips_through_to_track(tmp_path):
     track = _to_track(merged["results"]["matmul"]["on"])
     assert track.rounds == 2
     assert track.signals[1]["load_eff"] == 0.9
+
+
+# 2026-07-17 사고 재발 방지 — P8 Task 36 재개 세션이 --metric=thermal 플래그를
+# 빠뜨려 기본값 latency로 A100 실측을 돌렸고, 결과 JSON에 metric_mode 스탬프가
+# 없어 사후 검증도 불가능했던 사고에 대한 회귀 테스트.
+
+def test_build_remote_driver_stamps_metric_mode_in_result_dict():
+    # 원격 드라이버 소스가 결과 dict(__ABL_RESULT__/abl_result.json)에도
+    # metric_mode를 싣는 코드를 포함하는지 확인 — CONFIG의 metric_mode와는
+    # 별개로 최종 out dict에 실려야 회수측 검증(check_metric_mode_compat)이
+    # 동작한다.
+    src = _build_remote_driver(["kb_matmul_scalar"], 2, metric_mode="thermal")
+    assert '"metric_mode": metric_mode' in src
+
+
+def test_check_metric_mode_compat_returns_none_when_match():
+    assert check_metric_mode_compat({"metric_mode": "thermal"}, "thermal") is None
+
+
+def test_check_metric_mode_compat_returns_warning_when_mismatch():
+    msg = check_metric_mode_compat({"metric_mode": "latency"}, "thermal")
+    assert msg is not None
+    assert "latency" in msg and "thermal" in msg
+
+
+def test_check_metric_mode_compat_none_when_stamp_absent():
+    # 구포맷 드라이버 결과(스탬프 부재)는 통과 — 호출측이 별도 경고만 처리.
+    assert check_metric_mode_compat({"chip": "a100"}, "thermal") is None

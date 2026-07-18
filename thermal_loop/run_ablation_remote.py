@@ -148,7 +148,7 @@ def main():
     print(f"[remote] chip={chip!r} problems={list(CONFIG['problems'])} "
           f"max_rounds={CONFIG['max_rounds']} metric_mode={metric_mode!r}", flush=True)
 
-    out = {"chip": chip, "results": {}}
+    out = {"chip": chip, "metric_mode": metric_mode, "results": {}}
     for name, spec in CONFIG["problems"].items():
         vmap = spec["variant_map"]
         out["results"][name] = {
@@ -344,6 +344,25 @@ def filter_uncompleted(problems: list[str], done: set[str]) -> list[str]:
     return [p for p in problems if p not in done]
 
 
+def check_metric_mode_compat(result_dict: dict, expected: str) -> str | None:
+    """P8 Task 36 재발 방지 — 회수/재개 결과의 metric_mode가 요청과 일치하는지.
+
+    2026-07-17 사고: `--metric=thermal` 플래그 누락 세션이 기본값 latency로
+    A100 실측을 돌렸는데, 결과 JSON에 metric_mode 스탬프가 없어 사후 검증도
+    불가능했음. 이제 결과 dict에 metric_mode가 실리므로(main() 참조) 요청
+    모드와 대조 가능 — 불일치면 경고 문자열 반환, 일치/키 부재(구포맷)면 None.
+
+    반환값 규약: 불일치("...") → 호출측이 폐기/에러 처리, None → 통과(키 부재
+    포함 — 구포맷 파일은 별도 경고만 내고 차단하지 않음, 호출측 책임).
+    """
+    got = result_dict.get("metric_mode")
+    if got is None:
+        return None
+    if got != expected:
+        return (f"metric_mode 불일치 (기대 {expected!r}, 실제 {got!r})")
+    return None
+
+
 def merge_batch_results(batch_result_paths: list[Path]) -> dict:
     """P8 Task 33/34 — 여러 배치 결과 JSON을 문제 단위로 병합.
 
@@ -382,6 +401,11 @@ def main() -> int:
         src_thermal = _build_remote_driver(["matmul"], 2, metric_mode="thermal")
         compile(src_thermal, "<remote_driver_thermal>", "exec")
         assert '"metric_mode": "thermal"' in src_thermal
+
+        # 2026-07-17 사고 재발 방지 — 원격 드라이버가 결과 dict에도 metric_mode를
+        # 스탬프하는 코드를 담고 있는지(회수측 검증의 전제 조건).
+        assert '"metric_mode": metric_mode' in src_thermal, (
+            "원격 드라이버 결과 dict에 metric_mode 스탬프 코드 누락")
 
         # P5 §1-2-1 — 3문제(batched_gemm/kb_matmul_scalar/kb_softmax) variant map을
         # 실제 원격 config에 넣어 JSON 직렬화까지 확인(원격에서야 터지는 부류 방지).
@@ -475,6 +499,21 @@ def main() -> int:
     max_rounds = int(rest[1]) if len(rest) > 1 else 8
 
     if resume_path:
+        # 2026-07-17 사고 재발 방지 — resume 파일의 metric_mode가 현재 요청과
+        # 다르면 캠페인 혼입(예: thermal 캠페인 재개인데 latency 기본값으로
+        # 실행) 위험. 키 부재(구포맷, 기존 batch0/1 파일은 thermal로 검증된
+        # 데이터라 차단 금지)는 경고만.
+        try:
+            resume_data = json.loads(Path(resume_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            resume_data = {}
+        resume_mismatch = check_metric_mode_compat(resume_data, metric_mode)
+        if resume_mismatch:
+            print(f"ERR: resume 파일 {resume_mismatch} — 캠페인 혼입 금지",
+                  file=sys.stderr)
+            return 1
+        if resume_data and resume_data.get("metric_mode") is None:
+            print("[warn] resume 파일에 metric_mode 스탬프 없음(구포맷)")
         done = completed_problems_from_result(Path(resume_path))
         remaining = filter_uncompleted(problems, done)
         if done:
@@ -484,6 +523,14 @@ def main() -> int:
             print("[resume] 잔여 문제 없음 — 배치 전량 완료 상태, exec 생략")
             return 0
         problems = remaining
+
+    # 2026-07-17 사고 재발 방지 — exec 직전 로컬 모드를 눈에 띄게 배너로 출력.
+    # metric=latency인데 --metric= 플래그가 argv에 없으면(기본값 사용) thermal
+    # 캠페인 실행 실수를 놓치기 쉬우므로 명시 경고.
+    print(f"[mode] metric_mode={metric_mode!r}")
+    if metric_mode == "latency" and not any(a.startswith("--metric=") for a in argv):
+        print("[warn] metric_mode=latency는 기본값 — thermal 캠페인이면 "
+              "--metric=thermal 명시", file=sys.stderr)
 
     driver_src = _build_remote_driver(problems, max_rounds, metric_mode=metric_mode)
     total_rounds = len(problems) * 2 * max_rounds
@@ -542,6 +589,17 @@ def main() -> int:
                     except json.JSONDecodeError:
                         result = None
                     break
+        # 2026-07-17 사고 재발 방지 — 회수 결과의 metric_mode가 요청과 다르면
+        # 원격에 남은 이전 런의 stale abl_result.json을 집었거나 모드 혼선이므로
+        # 폐기하고 attempt 재시도 경로로 자연 합류(구포맷=키 부재는 경고만).
+        if result is not None:
+            mismatch = check_metric_mode_compat(result, metric_mode)
+            if mismatch:
+                print(f"[warn] 회수 결과 {mismatch} — 폐기", file=sys.stderr)
+                result = None
+            elif result.get("metric_mode") is None:
+                print("[warn] 결과에 metric_mode 스탬프 없음(구포맷 드라이버)",
+                      file=sys.stderr)
         # P8 Task 36 이상 징후 4 — 부분 결과(요청 문제 중 일부만 기록)를 완료로
         # 오판하지 않도록 완결성 검증. off+on 둘 다 있어야 그 문제는 "완료"로 인정
         # (completed_problems_from_result과 동일 기준). 미완이면 attempt 2로 재시도.
@@ -562,6 +620,10 @@ def main() -> int:
     if missing:
         print(f"ERR: 결과 불완전 — 요청 {len(problems)}문제 중 누락 {missing} "
               f"(재생성 재시도 후에도 미해소)", file=sys.stderr)
+        return 1
+    final_mismatch = check_metric_mode_compat(result, metric_mode)
+    if final_mismatch:
+        print(f"ERR: 최종 결과 {final_mismatch}", file=sys.stderr)
         return 1
 
     print(f"\n[chip={result.get('chip')!r}]")
