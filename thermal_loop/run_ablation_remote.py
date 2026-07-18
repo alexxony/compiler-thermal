@@ -623,6 +623,17 @@ def main() -> int:
         if result is not None:
             missing = [p for p in problems
                        if p not in completed_problems_from_result_dict(result)]
+            # 유실 창 제거(2026-07-18 구제 런1 유실 재발 방지): 원격 사본은 세션
+            # idle 종료와 함께 소멸하므로 fetch 성공 즉시 무조건 로컬 보존.
+            # 부분 결과도 저장 — 저장 책임을 호출자 관례에 위임하지 않는다.
+            import datetime
+            ts = datetime.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+            tag = "_partial" if missing else ""
+            adir = Path("artifacts")
+            adir.mkdir(exist_ok=True)
+            autosave = adir / f"abl_autosave_{ts}{tag}.json"
+            autosave.write_text(json.dumps(result, ensure_ascii=False))
+            print(f"[autosave] {autosave}", flush=True)
         if result is not None and not missing:
             break
         if missing:
