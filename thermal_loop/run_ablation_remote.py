@@ -123,6 +123,17 @@ def _run_track(problem, seed_code, variant_map, max_rounds, evolve_enabled,
                       submit_kind=submit_kind)
     led = Ledger(ledger_path)
     recs = [r for r in led.records if r.problem == problem]
+    # P8: 세션 누적형 CUDA OOM 완화 — 트랙 종료마다 GPU 메모리 반납(베스트에포트).
+    # 34_InstanceNorm/35_GroupNorm 사고: 선행 문제들이 해제 안 한 GPU 메모리가
+    # 누적돼 후속 대형 할당(7GB급)이 실패. empty_cache로 캐시 반납 + 잔존량 로깅.
+    try:
+        import gc, torch
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"  [gpu] post-track alloc={torch.cuda.memory_allocated()/1e9:.2f}GB "
+              f"reserved={torch.cuda.memory_reserved()/1e9:.2f}GB", flush=True)
+    except Exception:
+        pass
     return {
         "label": label,
         "metric_curve": led.metric_curve(problem),
@@ -540,9 +551,14 @@ def main() -> int:
         path = f.name
 
     def _alive() -> bool:
-        p = subprocess.run(["colab", "exec", "-s", session, "--timeout", "60"],
-                           input="print('ALIVE')", capture_output=True,
-                           text=True, timeout=120)
+        # 배치 2a 사고: colab exec 무응답 시 TimeoutExpired가 안 잡혀 러너 전체가
+        # traceback으로 죽음(heal 경로 진입 불가). 타임아웃/실행 실패 = 죽음 판정.
+        try:
+            p = subprocess.run(["colab", "exec", "-s", session, "--timeout", "60"],
+                               input="print('ALIVE')", capture_output=True,
+                               text=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return False
         return p.returncode == 0 and "ALIVE" in p.stdout
 
     is_thermal = metric_mode == "thermal"
