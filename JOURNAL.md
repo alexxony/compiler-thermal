@@ -20,3 +20,4 @@ vault `/mnt/c/ObsidianVault/Compiler_Thermal/PROGRESS.md`에 기록한다(2층 �
 - `2026-07-18T (T4)` — JOURNAL.md 도입: append-only 원장 관례 명문화, 오늘자 이력 소급 기록.
 
 - `2026-07-18T23:15:00+09:00` — P9 후보 A 착수: P8 compute-bound 0% 원인 조사(로컬 정적 분석 전용). `_variant_map_for`/`_make_cb` 폴백 구조 확인 + 35표본 전체 fired_rules/variant 파일 실재 여부 대조.
+- `2026-07-18T23:35:00+09:00` — P9 후보 A 완료: 원가설(variant 파일 부재→seed 폴백) 기각 — compute 20문제 전부 variant 파일 보유(초기 ls 오탐 정정, os.listdir 재확인). 실제 분류: (a)0 (b)variant적용+gain없음 9 (c)STOP즉시발화 9 (d)미발화 2. retire 10건은 메커니즘 정상이나 도착지도 무효. 레거시(matmul 등) 대비 코드 구조 동일·결과만 다름 — A100 ncu_breakdown 재실측 권고(claude-smart s1-308 프로토콜). 산출물 `artifacts/p9a_cause_analysis.md`(미커밋, 관례).
