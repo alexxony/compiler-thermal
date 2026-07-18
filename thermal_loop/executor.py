@@ -74,6 +74,13 @@ def _run_gate(mod) -> tuple[bool, float]:
       run_solve(case, device) -> Tensor    # solve 호출 → output
       reference(case, device) -> Tensor    # 정답
     GATE_SIZES 전부 PASS해야 passed=True. 다른 코드 경로라 교차검증 유효.
+
+    메모리 정책 (P8 격리 6문제 구제, 2026-07-18): case+out+ref를 GPU에 동시
+    보유하면 대형 케이스(7GB급)서 A100 40GB도 초과(진단: p8_35_groupnorm_diag.log,
+    35.48GiB 점유 중 7GiB 추가요청 OOM). out은 얻은 직후 CPU로 옮기고 GPU 참조
+    해제 + empty_cache → reference 실행 시점엔 GPU에 case만 남게. reference도
+    OOM나면 case까지 CPU로 내려 CPU에서 재시도(느리지만 정확성 검사는 성립).
+    비교는 항상 CPU 텐서끼리 — atol/rtol 값 자체는 무변경(판정 기준 불변).
     """
     import torch
 
@@ -84,11 +91,50 @@ def _run_gate(mod) -> tuple[bool, float]:
     for size in _gate_sizes(mod):
         case = mod.make_case(size, dev)
         out = mod.run_solve(case, dev)
-        ref = mod.reference(case, dev)
-        err = (out - ref).abs().max().item()
+        out_cpu = out.detach().cpu()
+        del out
+        if dev == "cuda":
+            torch.cuda.empty_cache()
+        try:
+            ref = mod.reference(case, dev)
+            ref_cpu = ref.detach().cpu()
+            del ref
+        except torch.cuda.OutOfMemoryError:
+            # reference 자체가 GPU서 못 뜸(예: GroupNorm 중간텐서) → case를 CPU로
+            # 내려 CPU에서 reference 재계산. 느려도 gate 통과 여부는 동일하게 성립.
+            if dev != "cuda":
+                raise
+            torch.cuda.empty_cache()
+            case_cpu = _case_to(case, "cpu")
+            del case
+            ref = mod.reference(case_cpu, "cpu")
+            ref_cpu = ref.detach().cpu()
+            del ref
+        finally:
+            if dev == "cuda":
+                torch.cuda.empty_cache()
+        err = (out_cpu - ref_cpu).abs().max().item()
         worst_err = max(worst_err, err)
-        ok &= torch.allclose(out, ref, atol=atol, rtol=rtol)
+        ok &= torch.allclose(out_cpu, ref_cpu, atol=atol, rtol=rtol)
     return ok, worst_err
+
+
+def _case_to(case, device: str):
+    """게이트 case를 다른 device로 이전. case 형태는 문제별 임의(Tensor 단독,
+    dict, 또는 35_GroupNorm_처럼 case['_model']에 nn.Module을 담는 패턴 등)라
+    범용 순회로 처리 — solve.py 계약(make_case 반환값)엔 고정 타입이 없어 방어적으로 분기.
+    nn.Module도 .to(device)를 갖기 때문에 Tensor와 함께 hasattr(v, 'to')로 포괄.
+    """
+    import torch
+
+    if isinstance(case, dict):
+        return {k: _case_to(v, device) for k, v in case.items()}
+    if isinstance(case, (list, tuple)):
+        moved = [_case_to(v, device) for v in case]
+        return type(case)(moved) if isinstance(case, tuple) else moved
+    if torch.is_tensor(case) or isinstance(case, torch.nn.Module):
+        return case.to(device)
+    return case  # to()가 없는 값(스칼라 등)은 그대로
 
 
 def _profile_ncu(code_path: str) -> dict | None:
