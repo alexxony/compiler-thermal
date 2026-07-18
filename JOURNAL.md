@@ -19,3 +19,4 @@ vault `/mnt/c/ObsidianVault/Compiler_Thermal/PROGRESS.md`에 기록한다(2층 �
 - `2026-07-18T22:39:32+09:00` — T3: `report_p8_stats.py`로 기존 29표본(batch0_full+1a+1b_partial+2a_thermal_partial+2b_thermal+3_thermal, 문제 집합 검증 완료 — 원본 stats 파일과 정확히 일치) + 구제 6문제를 병합해 35표본 전체 재판정 → `artifacts/p8_stats_final_v2_20260718.txt`. compute-bound 재현율 0.0%(FAIL, 판정선 70% 유지), memory-bound null율 100.0%(PASS), retire 발생률 27.6%→28.6%, gate_fail 무효 표본 0건 — 구제 6문제 편입 후에도 §1-2 판정 결론 불변.
 - `2026-07-18T (T4)` — JOURNAL.md 도입: append-only 원장 관례 명문화, 오늘자 이력 소급 기록.
 
+- `2026-07-18T23:15:00+09:00` — P9 후보 A 착수: P8 compute-bound 0% 원인 조사(로컬 정적 분석 전용). `_variant_map_for`/`_make_cb` 폴백 구조 확인 + 35표본 전체 fired_rules/variant 파일 실재 여부 대조.
