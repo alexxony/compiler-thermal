@@ -26,3 +26,4 @@ vault `/mnt/c/ObsidianVault/Compiler_Thermal/PROGRESS.md`에 기록한다(2층 �
 ## 2026-07-19
 
 - `2026-07-19T10:48:10+09:00` — P9-A 스팟 체크 착수: (b) 9건 중 3문제(3_Batched/7_small_K/13_symmetric) 선정, ncu seed/variant 디스패치 커널명 비교(s1-308 프로토콜). 1_Square 제외(variant=seed 동일).
+- `2026-07-19T11:36:50+09:00` — P9-A 스팟체크 원격 런 발사: thermal-p9a(A100) 배포+ncu 6회(3문제×seed/variant), 도구 커밋 53ec7a3, 카나리 PASS(ncu/torch/A100).
