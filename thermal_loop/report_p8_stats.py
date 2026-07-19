@@ -5,6 +5,14 @@
 (≥70% 판정선)을 집계한다. report_p4_deltat.py와 별개 — ΔT 축이 아니라 energy 축
 통계 전용. 실측(run) 없음, 순수 후처리. torch 불요.
 
+부호 규약(2026-07-19 수정, s2-799 재발 방지): metric_curve는 harness._metric의
+저장값 그대로 = **-energy_per_iter_j**(항상 음수, 클수록/0에 가까울수록 좋음 —
+"메트릭 우상향해야" harness.py 테스트 주석 참조). 이 파일은 소비 시점에
+energy = -metric으로 환원해 "값이 작을수록 좋음" 축으로 다룬다. 원래
+`_seed_and_best`가 raw metric에 직접 min()을 적용해 seed(round0, 가장 나쁜
+raw 값)를 best로 오판 — M1이 모든 문제에서 1.00 아티팩트로 고정되는 버그였다
+(P9-A ncu 스팟체크 실측으로 확정, JOURNAL 2026-07-19T13:04:29+09:00).
+
 M1(트랙 내부 개선 배율): evolve_ON seed(round 0) energy ÷ best(최솟값) round energy.
   best는 라벨이 아니라 값 기준(06-p6-signal-provenance-design §7-2 라벨 오프셋 주의).
 M2(ON/OFF 교차 격차): evolve_ON best ÷ evolve_OFF best.
@@ -36,19 +44,34 @@ class ProblemStats:
 
 
 def _seed_and_best(curve: list[tuple[int, float]]) -> tuple[float, float]:
-    """curve = [(round_idx, metric)]. metric은 energy_per_iter_j 규약을 따른다고
-    가정(값이 작을수록 좋음 — energy 축 관례). seed=round0, best=min(metric).
+    """curve = [(round_idx, metric)]. metric은 harness 저장 규약 그대로
+    **-energy_per_iter_j**(항상 음수, 값이 클수록/0에 가까울수록 좋음)를 따른다.
+
+    이 함수는 energy = -metric으로 환원한 뒤 "값이 작을수록 좋음" 축에서
+    seed=round0 energy, best=min(energy)를 반환한다(반환값은 항상 양수 energy —
+    호출측이 seed/best 나눗셈으로 배율을 계산하는 관례와 부합). 곡선에 양수
+    metric(v > 0)이 하나라도 섞여 있으면 부호 규약 위반(energy/latency 모드
+    모두 metric은 음수여야 함, harness.py::_metric 참조) — ValueError.
     """
     if not curve:
         raise ValueError("빈 metric_curve — 문제 결과 이상")
-    seed_val = curve[0][1]
-    best_val = min(v for _, v in curve)
-    return seed_val, best_val
+    if any(v > 0 for _, v in curve):
+        raise ValueError(
+            f"metric_curve에 양수 값 포함 — 부호 규약 위반(metric은 -energy, "
+            f"항상 음수여야 함): {curve}")
+    energies = [-v for _, v in curve]
+    seed_energy = energies[0]
+    best_energy = min(energies)
+    return seed_energy, best_energy
 
 
 def compute_metrics_for_problem(problem: str, result: dict, bucket: str) -> ProblemStats:
     """result = {"on": track_dict, "off": track_dict} (run_ablation_remote._to_track
     이전 raw dict 형태 — 이 함수는 raw dict를 직접 소비, TrackResult 의존 없음).
+
+    _seed_and_best가 이미 -metric 환원을 마친 양수 energy를 반환하므로 아래
+    m1/m2/m3 계산은 "energy 축(작을수록 좋음)" 그대로 성립 — 부호 처리는
+    _seed_and_best 한 곳에만 있다(이중 반전 방지).
     """
     on = result["on"]
     off = result["off"]
@@ -169,17 +192,22 @@ def main(argv: list[str]) -> int:
     from pathlib import Path
 
     if "--selfcheck" in argv:
+        # 부호 규약(harness._metric): metric_curve는 -energy_per_iter_j — 항상 음수,
+        # 값이 클수록(0에 가까울수록) 좋음. 아래 fake curve 전부 음수로 교체
+        # (s2-799 재발 방지 — 예전 selfcheck는 양수 곡선만 써서 부호 버그를 못 잡았음).
         fake_results = {
-            "matmul": {"on": {"label": "evolve_ON", "metric_curve": [(0, 10.0), (1, 2.0)],
+            # matmul: seed round0 energy=10.0(=-(-10.0)) -> best round1 energy=2.0
+            # (=-(-2.0)) -> M1 = 10.0/2.0 = 5.0 (개선 실재, seed != best).
+            "matmul": {"on": {"label": "evolve_ON", "metric_curve": [(0, -10.0), (1, -2.0)],
                               "stop_reason": "converged", "retire_count": 0,
                               "wasted_rounds": 0, "signals": [{"x": 1}, {"x": 2}]},
-                      "off": {"label": "evolve_OFF", "metric_curve": [(0, 10.0), (1, 9.0)],
+                      "off": {"label": "evolve_OFF", "metric_curve": [(0, -10.0), (1, -9.0)],
                              "stop_reason": "converged", "retire_count": 0,
                              "wasted_rounds": 1, "signals": [{"x": 1}, {"x": 1}]}},
-            "kb_softmax": {"on": {"label": "evolve_ON", "metric_curve": [(0, 5.0)],
+            "kb_softmax": {"on": {"label": "evolve_ON", "metric_curve": [(0, -5.0)],
                                   "stop_reason": "below_weight_gate", "retire_count": 0,
                                   "wasted_rounds": 0, "signals": [{}]},
-                          "off": {"label": "evolve_OFF", "metric_curve": [(0, 5.0)],
+                          "off": {"label": "evolve_OFF", "metric_curve": [(0, -5.0)],
                                  "stop_reason": "below_weight_gate", "retire_count": 0,
                                  "wasted_rounds": 0, "signals": [{}]}},
         }
@@ -187,9 +215,29 @@ def main(argv: list[str]) -> int:
         agg = aggregate_stats(fake_results, buckets)
         assert agg.compute_reproduction_rate == 1.0
         assert agg.memory_null_rate == 1.0
+        assert abs(agg.per_problem["matmul"].m1_track_gain - 5.0) < 1e-9, (
+            f"M1 부호 회귀 — {agg.per_problem['matmul'].m1_track_gain} (기대 5.0)")
         report = format_report(agg)
         assert "PASS" in report
         print(report)
+
+        # (a) seed≠best 개선 곡선, 비단조 포함 — [(0,-5.0),(1,-3.0),(2,-1.0),(3,-4.0)]
+        # 처럼 중간에 악화(-4.0 < -1.0, energy 기준 4.0 > 1.0)가 섞여도 best는
+        # round2(energy=1.0) 유지 -> M1 = seed(5.0)/best(1.0) = 5.0.
+        nonmonotone_curve = [(0, -5.0), (1, -3.0), (2, -1.0), (3, -4.0)]
+        seed_e, best_e = _seed_and_best(nonmonotone_curve)
+        assert abs(seed_e - 5.0) < 1e-9 and abs(best_e - 1.0) < 1e-9, (
+            f"비단조 곡선 seed/best 오산: seed={seed_e} best={best_e}")
+        assert abs((seed_e / best_e) - 5.0) < 1e-9, "비단조 곡선 M1 오산"
+        print("  비단조 개선 곡선 체크: PASS (seed=5.0, best=1.0(round2), M1=5.0)")
+
+        # (b) 양수 곡선 입력 -> ValueError (부호 규약 위반 감지).
+        try:
+            _seed_and_best([(0, 5.0), (1, 2.0)])
+            raise AssertionError("양수 metric_curve가 ValueError 없이 통과함 — 회귀")
+        except ValueError:
+            print("  양수 곡선 방어 체크: PASS (ValueError 발생 확인)")
+
         print("report_p8_stats.py self-check PASS")
         return 0
 
