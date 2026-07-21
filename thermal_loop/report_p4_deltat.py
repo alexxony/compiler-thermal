@@ -15,6 +15,7 @@ RcBackend 클래스(thermal/twin_eval.py)는 P2 설계 §"RcBackend 절대 무�
 from __future__ import annotations
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -101,15 +102,118 @@ def _build_rc_kw_hbm_fem() -> dict:
 
 RC_KW_HBM_FEM = _build_rc_kw_hbm_fem()
 
+# --- P10 Task 31: hotspot r_hbm_sink_max 로더 --------------------------------
+#
+# design: docs/11-p10-hotspot-deltat-design.md §2-2·§5 Task 31. avg 세트
+# (r_hbm_sink)와 달리 hotspot 세트(r_hbm_sink_max)는 냉각BC 범위(value_min/
+# value_max, 기존 파서와 동일 컬럼 접근) 외에 P3 3-시나리오(s0/s1/s2) 개별값이
+# basis_case 컬럼의 자유 텍스트 안에 있어 정규식 파싱이 필요하다(§2-2).
+_HOTSPOT_SCENARIO_RE = re.compile(
+    r"(s0_uniform|s1_phy_moderate|s2_phy_heavy)\s*:\s*"
+    r"dT=[-\d.]+K/P=[-\d.]+W->R=([-\d.]+)K/W"
+)
+
+
+def load_hbm_hotspot_rc_params(csv_path: Path = HBM_RC_PARAMS_CSV) -> dict:
+    """`rc_params.csv`의 `r_hbm_sink_max` 행에서 hotspot R 5점을 읽는다.
+
+    반환: {"representative": float, "cooling_bc_range": {"min": float,
+    "max": float}, "s0_uniform": float, "s1_phy_moderate": float,
+    "s2_phy_heavy": float} (설계 §5 Task 31 반환 스키마).
+
+    대표값·냉각BC 범위는 기존 파서(`load_hbm_fem_rc_params`)와 동일하게
+    value/value_min/value_max 컬럼에서 바로 읽는다. s0/s1/s2 개별값은
+    basis_case 컬럼 자유 텍스트를 정규식으로 파싱한다(§2-2).
+
+    파일 부재·행 부재·basis_case 파싱 실패는 전부 명확한 에러로 실패한다
+    (조용한 폴백 금지 — `load_hbm_fem_rc_params`와 동일 원칙 계승).
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"HBM hotspot RC 파라미터 CSV 없음: {csv_path} "
+            "(HBM_build r_hbm_sink_max 행 도착 전 — 재시도)"
+        )
+    with open(csv_path, newline="") as f:
+        rows = {row["parameter"]: row for row in csv.DictReader(f) if row.get("parameter")}
+    if "r_hbm_sink_max" not in rows:
+        raise ValueError(
+            f"HBM hotspot RC 파라미터 CSV에 r_hbm_sink_max 행 없음 ({csv_path})"
+        )
+    row = rows["r_hbm_sink_max"]
+    basis_case = row.get("basis_case", "")
+    matches = dict(_HOTSPOT_SCENARIO_RE.findall(basis_case))
+    missing = {"s0_uniform", "s1_phy_moderate", "s2_phy_heavy"} - matches.keys()
+    if missing:
+        raise ValueError(
+            f"r_hbm_sink_max basis_case에서 시나리오 패턴 추출 실패: "
+            f"누락={sorted(missing)} (basis_case={basis_case!r})"
+        )
+    return {
+        "representative": float(row["value"]),
+        "cooling_bc_range": {
+            "min": float(row["value_min"]),
+            "max": float(row["value_max"]),
+        },
+        "s0_uniform": float(matches["s0_uniform"]),
+        "s1_phy_moderate": float(matches["s1_phy_moderate"]),
+        "s2_phy_heavy": float(matches["s2_phy_heavy"]),
+    }
+
+
+# --- P10 Task 32: RC_KW_HBM_HOTSPOT 세트 구성 --------------------------------
+#
+# design §3-2·§5 Task 32/§7 D1~D3. hotspot R은 시나리오 의존(단일 dict 아님)이라
+# {시나리오명: rc_kw dict} 구조. die 3개는 legacy 유지, c_hbm도 legacy 유지(D3 —
+# hotspot 대응 c_hbm 버전 없음), r_hbm_sink만 시나리오별로 교체한다.
+_HOTSPOT_SCENARIO_KEYS = (
+    "coolbc_min", "coolbc_max", "s0_uniform", "s1_phy_moderate", "s2_phy_heavy",
+)
+
+
+def _build_rc_kw_hbm_hotspot() -> dict:
+    """RC_KW_HBM_HOTSPOT 5세트 구성 — CSV 부재 시 5개 전부 placeholder(None).
+
+    `_build_rc_kw_hbm_fem`의 placeholder 패턴 재사용(설계 §5 Task 32 요구사항).
+    """
+    try:
+        hotspot = load_hbm_hotspot_rc_params()
+        source = str(HBM_RC_PARAMS_CSV)
+        r_values = {
+            "coolbc_min": hotspot["cooling_bc_range"]["min"],
+            "coolbc_max": hotspot["cooling_bc_range"]["max"],
+            "s0_uniform": hotspot["s0_uniform"],
+            "s1_phy_moderate": hotspot["s1_phy_moderate"],
+            "s2_phy_heavy": hotspot["s2_phy_heavy"],
+        }
+    except (FileNotFoundError, ValueError) as e:
+        source = f"PLACEHOLDER(hotspot 자산 대기): {e}"
+        r_values = {k: None for k in _HOTSPOT_SCENARIO_KEYS}
+
+    sets = {}
+    for name in _HOTSPOT_SCENARIO_KEYS:
+        base = dict(RC_KW_LEGACY)  # die 3개 + c_hbm(D3) legacy 유지
+        base["r_hbm_sink"] = r_values[name]
+        base["_hotspot_source"] = source
+        sets[name] = base
+    return sets
+
+
+RC_KW_HBM_HOTSPOT = _build_rc_kw_hbm_hotspot()
+
 # 리포트 출력용 라벨 — 세트 dict identity로 이름을 역조회한다(build_report에서 사용).
 RC_KW_SET_LABELS = {
     id(RC_KW_LEGACY): "LEGACY",
     id(RC_KW_HBM_FEM): "HBM_FEM",
+    id(RC_KW_HBM_HOTSPOT["coolbc_min"]): "HOTSPOT_COOLBC_MIN",
+    id(RC_KW_HBM_HOTSPOT["coolbc_max"]): "HOTSPOT_COOLBC_MAX",
+    id(RC_KW_HBM_HOTSPOT["s0_uniform"]): "HOTSPOT_S0",
+    id(RC_KW_HBM_HOTSPOT["s1_phy_moderate"]): "HOTSPOT_S1",
+    id(RC_KW_HBM_HOTSPOT["s2_phy_heavy"]): "HOTSPOT_S2",
 }
 
 
 def rc_kw_set_label(rc_kw: dict) -> str:
-    """rc_kw 딕셔너리 → 세트 라벨 문자열(리포트 표기용, Task 4 요구사항)."""
+    """rc_kw 딕셔너리 → 세트 라벨 문자열(리포트 표기용, Task 4/33 요구사항)."""
     label = RC_KW_SET_LABELS.get(id(rc_kw))
     if label is not None:
         return label
@@ -366,6 +470,100 @@ def build_report(configs, rc_kw: dict = RC_KW_LEGACY) -> str:
                 "불변 ✓" if inv else "⚠️ 뒤집힘 — idle 정밀측정 승격 조건 발동")
             parts.append(summ)
     return "\n".join(parts)
+
+
+# --- P10 Task 34: build_hotspot_report() -------------------------------------
+#
+# design §3-1·§5 Task 34. avg 리포트(build_report, 문제×2시나리오(a/b))와 열
+# 구조가 달라(문제×5 R시나리오) 별도 함수로 신설(D5). build_report()는 무변경.
+_HOTSPOT_SCENARIO_LABELS = (
+    ("s0_uniform", "HOTSPOT_S0"),
+    ("s1_phy_moderate", "HOTSPOT_S1"),
+    ("s2_phy_heavy", "HOTSPOT_S2"),
+    ("coolbc_min", "HOTSPOT_COOLBC_MIN"),
+    ("coolbc_max", "HOTSPOT_COOLBC_MAX"),
+)
+
+
+def build_hotspot_report(configs) -> str:
+    """4문제 × 5 R시나리오(hotspot) 표 렌더 — avg 축(LEGACY)도 참고로 병기.
+
+    §3-1 표 구조: 문제별로 avg(LEGACY) (b) gap과 5개 hotspot R시나리오의
+    (b) gap을 함께 렌더. null 문제(kb_softmax)는 "null"로 표시(§4-1 4행).
+    build_report()는 이 함수와 완전히 독립 — 무변경(§4-3 회귀 게이트).
+    """
+    parts = ["=" * 60,
+             "P10 RcBackend ΔT hotspot 리포트 — avg vs hotspot(5 R시나리오)",
+             "=" * 60]
+    for cfg in configs:
+        problem = cfg["problem"]
+        res_avg = run_problem(cfg, rc_kw=RC_KW_LEGACY)
+        parts.append(f"\n{'-'*60}")
+        parts.append(f"문제: {problem}")
+        parts.append("-" * 60)
+        if res_avg["is_null"]:
+            parts.append("  → null 대조군(seed=best) — R세트 무관, 방향 판정 skip")
+            parts.append(f"  avg(LEGACY) (b) gap: null")
+            for scenario_key, label in _HOTSPOT_SCENARIO_LABELS:
+                parts.append(f"  {label} (b) gap: null")
+            continue
+        gap_avg = res_avg["b_seed_t"] - res_avg["b_best_t"]
+        parts.append(f"  avg(LEGACY) (b) gap: {gap_avg:.4f}K")
+        for scenario_key, label in _HOTSPOT_SCENARIO_LABELS:
+            rc_kw = RC_KW_HBM_HOTSPOT[scenario_key]
+            if rc_kw.get("r_hbm_sink") is None:
+                parts.append(f"  {label} (b) gap: null (hotspot 자산 placeholder)")
+                continue
+            res_hs = run_problem(cfg, rc_kw=rc_kw)
+            gap_hs = res_hs["b_seed_t"] - res_hs["b_best_t"]
+            parts.append(f"  {label} (b) gap: {gap_hs:.4f}K")
+    return "\n".join(parts)
+
+
+# --- P10 Task 35: hotspot_verdict() / hotspot_verdict_rollup() ---------------
+#
+# design §4-1·§4-2. 방향 일치 bool + 배율 감쇠 비율(참고값, 판정에 미사용).
+# 문제 단위 롤업은 AND 조건 — 1개라도 반전이면 "부분 PASS — 시나리오 의존"
+# (FAIL로 뭉개지 않음, §4-2).
+_HOTSPOT_SCENARIO_KEY_MAP = dict(_HOTSPOT_SCENARIO_LABELS)
+
+
+def hotspot_verdict(cfg: dict, scenario: str) -> dict:
+    """문제 cfg, hotspot R시나리오 1건 → 방향 일치 + 배율 감쇠 비율.
+
+    반환: {"direction_match": bool|None, "attenuation_ratio": float|None}.
+    direction_match: avg(LEGACY) (b) gap 부호와 hotspot (b) gap 부호가 같은지
+    (§4-1 1행). null 문제는 None(판정 skip, §4-1 4행).
+    attenuation_ratio: hotspot gap / avg gap — 참고 기록용(§4-1 3행, 판정 무관).
+    """
+    res_avg = run_problem(cfg, rc_kw=RC_KW_LEGACY)
+    if res_avg["is_null"]:
+        return {"direction_match": None, "attenuation_ratio": None}
+    gap_avg = res_avg["b_seed_t"] - res_avg["b_best_t"]
+    rc_kw = RC_KW_HBM_HOTSPOT[scenario]
+    res_hs = run_problem(cfg, rc_kw=rc_kw)
+    gap_hs = res_hs["b_seed_t"] - res_hs["b_best_t"]
+    direction_match = (gap_avg > 0) == (gap_hs > 0)
+    attenuation_ratio = gap_hs / gap_avg if gap_avg != 0 else float("nan")
+    return {"direction_match": bool(direction_match),
+            "attenuation_ratio": attenuation_ratio}
+
+
+def hotspot_verdict_rollup(per_scenario: dict) -> str:
+    """§4-2 AND 조건 문제 단위 롤업.
+
+    per_scenario: {시나리오명: {"direction_match": bool|None, ...}}.
+    전부 True → "PASS". 일부 False(True/False 혼재) → "부분 PASS — 시나리오
+    의존"(FAIL로 뭉개지 않음). 전부 None(null 문제) → "null".
+    attenuation_ratio는 이 함수의 판정에 영향 주지 않는다(참고값 전용).
+    """
+    matches = [v["direction_match"] for v in per_scenario.values()]
+    non_null = [m for m in matches if m is not None]
+    if not non_null:
+        return "null"
+    if all(non_null):
+        return "PASS"
+    return "부분 PASS — 시나리오 의존"
 
 
 def main() -> int:
