@@ -39,6 +39,7 @@ subprocess**로 스모크(각 프로세스가 끝나면 OS가 메모리를 전�
 처리 — 최종 정오답 판정은 원격 A100 VM 스모크(메모리 여유·GPU 확보)가 맡는다.
 """
 from __future__ import annotations
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -96,12 +97,19 @@ def test_generated_problem_cpu_smoke(prob_dir: Path):
     절대 금지** — rc 값 하나만 보고 판단(하드코딩 리스트는 90_cumprod 같은
     오분류를 낳음, 모듈 docstring 참조). 그 외 모든 비정상 종료(트레이스백 있는
     rc=1, 다른 시그널, 타임아웃 등)는 그대로 fail 유지.
+
+    triton 미설치 skip 처리(2026-07-22): rc==1이면서 stderr에
+    `ModuleNotFoundError.*triton` 패턴이 잡히는 경우도 동일 원칙(문제 이름이
+    아니라 stderr 신호로 판단)으로 skip — 이 로컬 venv에 triton이 없어 생기는
+    환경 문제이지 solve.py의 코드 결함이 아니다.
     """
     snippet = _SMOKE_SNIPPET.format(prob_dir=str(prob_dir))
     result = subprocess.run([_PYTHON, "-c", snippet], capture_output=True,
                             text=True, timeout=300)
     if result.returncode == -9:
         pytest.skip("SIGKILL(OOM 추정) — 로컬 메모리 제약, A100 원격 스모크에서 검증")
+    if result.returncode == 1 and re.search(r"ModuleNotFoundError.*triton", result.stderr):
+        pytest.skip("triton 미설치 — 로컬 환경에 triton 미설치, 해당 KB 변환 문제는 CPU 스모크 스킵")
     assert result.returncode == 0 and "SMOKE_OK" in result.stdout, (
         f"{prob_dir.name} 스모크 실패 (rc={result.returncode})\n"
         f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr[-3000:]}")
