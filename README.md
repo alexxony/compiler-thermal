@@ -53,6 +53,7 @@ a hotspot ΔT (°C) via a two-node RC thermal model, cross-checked against Ansys
 | **P4 / P7 — RC ΔT verification axis** | Duty-cycle *definition* flips the conclusion: at 100% saturated duty, TF32 has *worse* ΔT (higher instantaneous power); at iso-work duty (15.66%), TF32 is **17.16 K better**. Direction agrees with the energy-axis result. Generalized to 4 problems — all agree in direction (PASS). |
 | **P8 — KernelBench 35-problem scale ablation** | v4 verdict: matmul-class **7/8 = 87.5% PASS** (2.61×–6.00× gain), conv-fusion class falls short (rule/variant coverage gap, R0 STOP is legitimate — not a defect), memory-bound null rate **100% PASS**. v3 original-criterion figure (40% FAIL, undifferentiated) reported alongside, not suppressed. A reporter sign bug (`best=min(metric)` against a `-energy` convention) was caught by cross-checking raw metric curves against the statistical output, not by the reporter's own selfcheck. |
 | **P10 — hotspot ΔT** | Extends the RC axis from average-power to a hotspot resistance path (`r_hbm_sink_max`, imported from the sibling HBM_build project's Ansys thermal model). All 4 non-null scenarios agree in direction (4/4 PASS) — but contrary to the pre-registered "attenuation" expectation, the hotspot gap **amplifies** relative to the average-power gap (ratio 1.23×–1.64×, e.g. matmul avg 17.16 K → hotspot 21.06–28.12 K). |
+| **P11 — hotspot ΔT, second power condition** | Imports a second, independent hotspot resistance set from HBM_build (`r_hbm_sink_max_p4`: A/B cooling series × S0–S2 power maps, 6 cases, **30 W** FEM condition vs P10's 16 W). All 3 non-null problems agree in direction, 6/6 cases, under both an avg-axis and a P3-hotspot-axis check. The P10 amplification pattern (1.23×–1.64×) **reproduces under this second, independent power condition** (16 W → 30 W) — not attenuated. 27 new tests, independently verified 6/6 PASS. |
 | **RC backend validation** | Own 2-node RC (forward Euler) vs Ansys Twin Builder: **max error 0.0006 K / 10s** step response. |
 
 ## Verification culture
@@ -65,11 +66,12 @@ a hotspot ΔT (°C) via a two-node RC thermal model, cross-checked against Ansys
 - **sha256 reproducibility**: where a claim depends on a generated artifact (e.g. the P8
   stratified 35-problem sample), the artifact is regenerated from the CLI and hash-compared
   against the original — not just re-read.
-- **Test suite**: currently **~224 passed / 12 skipped / 2 failed**. The 2 failures are a
-  pre-existing `triton`-not-installed environment gap (unrelated to any change in this repo).
-  Skip count varies (12–14) because one smoke test hits CUDA OOM under WSL memory limits and
-  gets conditionally skipped — this is environmental, not a hidden regression; **new failures
-  introduced by any phase's work: 0**, checked every phase.
+- **Test suite**: currently **0 failed** (last independently re-run count: 250 passed / 15
+  skipped). Skip count is non-deterministic — it varies run to run because one smoke test hits
+  CUDA OOM under WSL memory limits and gets conditionally skipped, and a `triton`-not-installed
+  environment gap is now also skip-classified rather than counted as failure — this is
+  environmental, not a hidden regression; **new failures introduced by any phase's work: 0**,
+  checked every phase.
 
 ## Repository layout
 
@@ -129,4 +131,4 @@ itself never touches KernelBench code.
 
 ## License
 
-Personal portfolio / research prototype.
+MIT — see [LICENSE](LICENSE). Personal portfolio / research prototype.
