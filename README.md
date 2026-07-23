@@ -1,79 +1,63 @@
-# Compiler_Thermal
+# Compiler-Thermal
 
-A self-evolving optimization loop that judges GPU compiler transformations by **simulated
-temperature (°C) and energy**, not latency. Fork of [GPU-Solver](https://github.com/alexxony/gpu-solver-loop)
-(public) — same rule-evolution engine, objective function swapped from latency to
-`energy_per_iter_j`. Prior-art survey (P0) found no thermal-judgment compiler work upstream of
-this: the closest related work (energy-aware kernel generation, energy-aware agents) stops at
-J/W — nobody carries the signal through to a physical ΔT via an RC thermal model.
+> This README documents the thermal-axis project. For the sibling latency-axis engine it
+> forks from, see [gpu-solver-loop](https://github.com/alexxony/gpu-solver-loop).
 
-> This README documents the thermal-axis project. For the sibling latency-axis project (the
-> engine this was forked from) see [gpu-solver-loop](https://github.com/alexxony/gpu-solver-loop).
+## 1. What this is
 
-## Architecture
+A simulation-based optimization loop that judges GPU compiler transformations by **RC-model
+thermal delta (ΔT, K) and energy**, not latency. On real A100 measurements feeding a validated
+thermal model: TF32 vs fp32 on matmul improves `energy_per_iter_j` by **5.32×–5.75×**, that
+energy gain translates to **17.16 K** better hotspot ΔT at iso-work duty cycle, and a
+KernelBench-derived 35-problem ablation reproduces the gain on **7/8 (87.5%) of the
+compute-bound matmul bucket** while memory-bound problems correctly show a null (100% PASS)
+rather than a false gain.
 
-```mermaid
-flowchart TD
-    seed([seed kernel / prev variant]) --> gen[Generator]
-    gen --> gate{Gate<br/>correctness}
-    gate -->|FAIL| regen[regenerate round] --> gen
-    gate -->|PASS| prof[Thermal profiler<br/>ncu traffic run + power run, SEPARATE]
-    prof --> merge[merge_signals]
-    merge --> sig[/Signal<br/>energy_per_iter_j · p_hbm_w · p_die_w · dram_bytes/]
-    sig --> match[Rule engine<br/>match sig × rules × ctx]
-    match --> hyp[fired rule = next hypothesis]
-    hyp --> ledger[(Ledger<br/>round history)]
-    ledger --> evolve[Rule Evolver<br/>promote / retire / propose]
-    evolve -.feedback.-> rules[(Rule table)]
-    rules --> match
-    hyp -->|is_stop| done([saturated → honest stop])
-    hyp -->|continue| gen
+## 2. Why this is needed
 
-    sig -.2nd verification axis.-> rc[RC thermal model<br/>Twin Builder-verified, max err 0.0006 K/10s]
-    rc --> deltat[/ΔT_hbm report<br/>saturated vs iso-work duty cycle/]
+A dedicated prior-art survey (6 systems: Zhang et al. 2024 energy-aware kernel generation,
+KernelPro, FlipFlop, Zeus, GPOEO, and LPTN/Twin Builder thermal-ROM work) found no system that
+carries a compiler-transformation decision through to a simulated physical temperature. The
+closest work stops at energy (J) or power (W) as the judged quantity. Thermal-aware scheduling,
+DVFS, and floorplanning are themselves not new — they've existed since the 2000s — but none of
+the surveyed systems couples that kind of judgment to an RC thermal model driven by measurement
+feedback. **The contribution here is narrow: take the LLM-agent optimization loop's
+objective-function slot — normally latency or energy — and put a simulated RC-model ΔT in it
+instead**, with the same measurement-driven rule evolution as the sibling latency-axis project.
 
-    classDef diff fill:#ffe6cc,stroke:#d79b00,stroke-width:2px;
-    classDef rc fill:#dae8fc,stroke:#6c8ebf,stroke-width:2px;
-    class evolve,rules diff
-    class rc,deltat,sig rc
-```
+| System | Judged quantity | Rule/decision feedback loop |
+|---|---|---|
+| Zhang et al. 2024 (energy-aware kernel gen) | Energy (J) | No — static cost model, no measurement-driven rule update |
+| KernelPro | Latency (primary), energy (tiebreak) | No — bottleneck classification is LLM-judged, not rule-evolved |
+| FlipFlop | Power/energy (static estimate) | No — static analysis, no runtime feedback |
+| Zeus | Energy (J), via NVML | No — hyperparameter/power-cap tuning, not a rule table |
+| GPOEO | Energy, DVFS setpoint | No — online frequency search, not a classification rule table |
+| LPTN / Twin Builder thermal-ROM | Temperature (°C) | N/A — thermal simulation only, never coupled to a compiler loop |
+| **This project** | **Simulated hotspot ΔT (K), via RC model** | **Yes — same rule/evolver/ledger mechanism as gpu-solver-loop** |
 
-The rule engine (`rules.py`/`evolver.py`/`ledger.py`) is **unchanged** from GPU-Solver — only
-the objective function changed (`harness._metric(mode="thermal")` compares
-`-energy_per_iter_j` instead of `-latency`). Measurement runs the ncu traffic pass and the
-power-sampling pass **separately** (they can't share a kernel launch) and reconciles them in
-`merge_signals`. A second, independent verification axis converts the same measured power into
-a hotspot ΔT (°C) via a two-node RC thermal model, cross-checked against Ansys Twin Builder.
+This project is one of three sibling projects sharing the same optimization-loop discipline
+applied to different objective functions: it is a controlled transfer experiment forked from
+[gpu-solver-loop](https://github.com/alexxony/gpu-solver-loop) with the objective swapped from
+latency to RC-model ΔT, while [hbm-build](https://github.com/alexxony/hbm-build) supplies the
+Ansys Icepak hotspot thermal-resistance values (`rc_params.csv`) that anchor this project's RC
+model. All three independently follow the same disciplined pattern — controlled ON/OFF
+comparison, immediate ledger recording, and honest negative-result reporting (see `JOURNAL.md`
+here) — without claiming the three repos are procedurally identical; where they diverge (e.g.
+pre-registered hypotheses, independent re-derivation) is stated plainly in section 5.
 
-## Key results (negative results included, not hidden)
+## 3. How it works
 
-| Phase | Result |
-|---|---|
-| **P3 — energy gain** | TF32 vs fp32 on matmul: **5.32×–5.75×** improvement in `energy_per_iter_j` (real A100). First measurement attempt read as "TF32 loses on energy" — traced to a definition bug (`energy_j` was a fixed 3.0s power-window integral, not divided by iteration count, so it collapsed to `-power` and structurally penalized the faster kernel). Fixed by switching to `energy_per_iter_j = power_avg_w × kernel_time_s`. |
-| **P4 / P7 — RC ΔT verification axis** | Duty-cycle *definition* flips the conclusion: at 100% saturated duty, TF32 has *worse* ΔT (higher instantaneous power); at iso-work duty (15.66%), TF32 is **17.16 K better**. Direction agrees with the energy-axis result. Generalized to 4 problems — all agree in direction (PASS). |
-| **P8 — KernelBench 35-problem scale ablation** | v4 verdict: matmul-class **7/8 = 87.5% PASS** (2.61×–6.00× gain), conv-fusion class falls short (rule/variant coverage gap, R0 STOP is legitimate — not a defect), memory-bound null rate **100% PASS**. v3 original-criterion figure (40% FAIL, undifferentiated) reported alongside, not suppressed. A reporter sign bug (`best=min(metric)` against a `-energy` convention) was caught by cross-checking raw metric curves against the statistical output, not by the reporter's own selfcheck. |
-| **P10 — hotspot ΔT** | Extends the RC axis from average-power to a hotspot resistance path (`r_hbm_sink_max`, imported from the sibling HBM_build project's Ansys thermal model). All 4 non-null scenarios agree in direction (4/4 PASS) — but contrary to the pre-registered "attenuation" expectation, the hotspot gap **amplifies** relative to the average-power gap (ratio 1.23×–1.64×, e.g. matmul avg 17.16 K → hotspot 21.06–28.12 K). |
-| **P11 — hotspot ΔT, second power condition** | Imports a second, independent hotspot resistance set from HBM_build (`r_hbm_sink_max_p4`: A/B cooling series × S0–S2 power maps, 6 cases, **30 W** FEM condition vs P10's 16 W). All 3 non-null problems agree in direction, 6/6 cases, under both an avg-axis and a P3-hotspot-axis check. The P10 amplification pattern (1.23×–1.64×) **reproduces under this second, independent power condition** (16 W → 30 W) — not attenuated. 27 new tests, independently verified 6/6 PASS. |
-| **RC backend validation** | Own 2-node RC (forward Euler) vs Ansys Twin Builder: **max error 0.0006 K / 10s** step response. |
+![Architecture](charts/architecture.svg)
 
-## Verification culture
+This is a **controlled transfer experiment, not a rewrite**: `rules.py`, `evolver.py`, and
+`ledger.py` are unchanged from gpu-solver-loop — only the objective function changed
+(`harness._metric(mode="thermal")` compares `-energy_per_iter_j` instead of `-latency`).
+Measurement runs the ncu traffic pass and the power-sampling pass **separately** (they can't
+share a kernel launch) and reconciles them in `merge_signals`. A second, independent verification
+axis converts the same measured power into a hotspot ΔT (K) via a two-node RC thermal model,
+cross-checked against Ansys Twin Builder.
 
-- **GPU-free selfchecks** (`selfcheck.py`, `selfcheck_thermal.py`) validate the full plumbing
-  (rule firing, retire/promote, energy pipeline) with a fake profiler — no GPU or Colab needed.
-- **Independent verifier re-derivation**: every headline claim above was independently
-  re-derived from raw ledger/result JSON (not re-stated from the implementer's report) before
-  being written up.
-- **sha256 reproducibility**: where a claim depends on a generated artifact (e.g. the P8
-  stratified 35-problem sample), the artifact is regenerated from the CLI and hash-compared
-  against the original — not just re-read.
-- **Test suite**: currently **0 failed** (last independently re-run count: 250 passed / 15
-  skipped). Skip count is non-deterministic — it varies run to run because one smoke test hits
-  CUDA OOM under WSL memory limits and gets conditionally skipped, and a `triton`-not-installed
-  environment gap is now also skip-classified rather than counted as failure — this is
-  environmental, not a hidden regression; **new failures introduced by any phase's work: 0**,
-  checked every phase.
-
-## Repository layout
+### Repository layout
 
 ```
 thermal/            # measurement + RC thermal model
@@ -81,11 +65,11 @@ thermal/            # measurement + RC thermal model
   power_sampler.py   # injectable power reader, trapezoidal energy integration
   measure.py         # merge_signals: reconciles the separate ncu + power runs
   duty_power.py      # power -> time series, duty-cycle average power
-  twin_eval.py        # RC backend (2-node Euler), Twin Builder-verified
+  twin_eval.py       # RC backend (2-node Euler), Twin Builder-verified
   hbm_split.py       # p_hbm / p_die power split
 
-thermal_loop/        # the evolution loop, forked from GPU-Solver's loop/
-  rules.py, evolver.py, ledger.py   # UNCHANGED from GPU-Solver (same mechanism)
+thermal_loop/        # the evolution loop, forked from gpu-solver-loop's loop/
+  rules.py, evolver.py, ledger.py   # UNCHANGED from gpu-solver-loop (same mechanism)
   harness.py         # objective function: energy_per_iter_j instead of latency
   executor.py        # kernel run + thermal profiling (traffic run + power run, separate)
   colab_profiler.py, run_ablation_remote.py   # colab-cli remote batch ablation
@@ -96,13 +80,10 @@ thermal_loop/        # the evolution loop, forked from GPU-Solver's loop/
 problems/            # seed kernels — legacy (matmul, batched_gemm, kb_matmul_scalar,
                      #   kb_softmax) + KernelBench-derived (35-problem stratified sample)
 tests/               # 20 files
+evidence/            # curated ledger subset backing the headline numbers below
 ```
 
-`artifacts/` and `results/` (raw logs, ledgers, per-run JSON) are gitignored — kept locally,
-not committed, per this project's convention; claims trace back to them but the files
-themselves aren't versioned.
-
-## Running it
+### Run
 
 ```bash
 # install
@@ -121,13 +102,85 @@ python3 thermal_loop/run_ablation_remote.py <problem_list> <max_rounds> --sessio
 Colab measurement is optional for verifying the plumbing — the fake-profiler selfchecks above
 exercise the same rule-firing / retire / promote logic without a GPU.
 
-## KernelBench attribution
+### KernelBench attribution
 
 Problem *definitions* for the scale-ablation phase (P8) are ingested from
 [ScalingIntelligence/KernelBench](https://github.com/ScalingIntelligence/KernelBench) via
 `thermal_loop/kb_convert.py` — the benchmark repository is not modified or vendored; only its
 problem specs are converted into this project's `solve.py` format. The rule/evolution engine
 itself never touches KernelBench code.
+
+## 4. Evidence — where to look
+
+`artifacts/` and `results/` (raw logs, ledgers, per-run JSON) are gitignored and stay local, per
+this project's convention. A curated subset backing every headline number below is committed to
+[`evidence/`](evidence/), with a file-by-file map from claim to source in
+[`evidence/README.md`](evidence/README.md).
+
+| Claim | Evidence file(s) | Field / derivation |
+|---|---|---|
+| TF32 vs fp32 energy gain, **5.32×–5.75×** | `evidence/thermal-gain-matmul-{on,off}.jsonl` | round0→round1 ratio of `signal.energy_per_iter_j`, re-derivable with a 6-line script in `evidence/README.md` |
+| Hotspot ΔT anchor, **17.16 K** (iso-work duty) | `evidence/p6_kbms_retry_20260713_result.json`, `evidence/p7_bgemm_softmax_20260714_result.json` | **derived value** — not stored directly in the ledger; computed from these files' raw `p_die_w`/`p_hbm_w` signals by `thermal_loop/report_p4_deltat.py` via the `RC_KW_LEGACY` RC-model constants, regression-gated in `tests/test_hotspot_deltat.py` |
+| KernelBench 35-problem ablation, v3 **40% FAIL** / v4 **87.5% PASS**, 2.61×–6.00× | `evidence/p8_stats_final_v3_20260719.txt` | per-problem M1 gain ratio and `null` columns; v4 is a bucket reclassification of the same underlying v3 results, not a re-measurement |
+| Hotspot amplification **1.23×–1.64×**, P11 30 W condition, 6/6 direction match | `evidence/p11_verify_status.md` | independent verifier's disk-forensic re-derivation, not a self-report; underlying `rc_params.csv` values (hbm-build project) spot-checked to 6 decimal places in §4 |
+| RC backend validation, **max error 0.0006 K / 10 s** | `evidence/twinbuilder_tr1_ref.csv` | Ansys Twin Builder TR1 step-response reference, compared against this project's `RcBackend` in `tests/test_twin_eval.py` |
+
+### Reproduce
+
+```bash
+# GPU-free plumbing check
+python3 thermal_loop/selfcheck_thermal.py
+
+# RC backend vs Twin Builder reference
+.venv/bin/python -m pytest tests/test_twin_eval.py -v
+
+# full local suite
+uv run pytest
+```
+
+## 5. Limits / not proven
+
+- **No physical measurement — simulation vs. simulation.** Every ΔT and energy figure here comes
+  from measured GPU power/traffic signals fed through a compact RC thermal model, cross-checked
+  against Ansys Twin Builder simulation output. There is no physical thermocouple or die-shot
+  ground truth anywhere in this chain.
+- **The iso-work duty cycle (15.66%) is a chosen comparison basis, not the only valid one, and
+  it is load-bearing.** It compares "heat produced to finish the same amount of work" — at
+  100% saturated duty the conclusion **flips**: TF32 shows *worse* ΔT at full instantaneous
+  saturation, and only comes out ahead once you account for it finishing the work faster and
+  idling sooner. Both duty-cycle regimes are reported; iso-work is the one used for the 17.16 K
+  headline because it isolates the quantity actually being compared (heat per unit of work done).
+- **KernelBench ablation is 40% at the pre-registered criterion.** The v4 87.5%/7-of-8 figure is
+  a reclassification (compute-matmul bucket only, conv-fusion separated out) of the same v3
+  results — not a re-measurement. The v3 40% figure, measured against the original pre-registered
+  criterion, is reported alongside rather than replaced.
+- **Hotspot amplification (1.23×–1.64×) contradicts the pre-registered expectation.** Attenuation
+  was hypothesized going in; amplification is what measurement showed, at both the P10 (16 W)
+  and P11 (30 W, independent second power condition) levels. Reported as observed, not adjusted
+  to fit the hypothesis.
+- **No claim of identical methodology across all three sibling repos.** This repo and hbm-build
+  both document pre-registered hypotheses with recorded reversals (P10 here, P4 there) and
+  sha256-checked reproducibility of generated artifacts; gpu-solver-loop does not have documented
+  evidence of either practice. All three do independently follow a narrower five-rule pattern —
+  controlled ON/OFF comparison, immediate structured ledger recording, and honest reporting of
+  negative/reversed results — and that narrower pattern is what's asserted to hold across all
+  three, not full procedural identity.
+- **Independent verification here means re-derivation from raw ledger files by a separate
+  reviewing pass within this project**, not an external, disinterested third party. `evidence/`
+  exists specifically so an outside reader can perform that re-derivation themselves.
+
+## 6. Status
+
+Test suite: currently **0 failed** (last re-run: 250 passed / 15 skipped). Skip count is
+non-deterministic — one smoke test hits CUDA OOM under WSL memory limits and is conditionally
+skipped, and a `triton`-not-installed environment gap is skip-classified rather than counted as
+failure. What's invariant across every phase's work: **new failures introduced: 0**, checked
+every phase.
+
+Hotspot ΔT has been verified under two independent power conditions (16 W and 30 W) with the
+same amplification pattern reproducing both times. Remaining open items: scaling the KernelBench
+ablation beyond the 35-problem stratified sample, and closing the conv-fusion rule/variant
+coverage gap identified in the ablation.
 
 ## License
 
