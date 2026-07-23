@@ -1,0 +1,42 @@
+=== P8 §1-2 사전 등록 기준 대조 ===
+compute-bound 재현율: 40.0% (FAIL — 판정선 70%)
+memory-bound null율: 100.0% (PASS — 판정선 70%)
+retire 발생률: 28.6%
+gate_fail 무효 표본: 0건
+
+=== 문제별 M1~M6 ===
+  100_ConvTranspose3d_Clamp_Min_Divide bucket=memory-reduce-elementwise  M1=  1.00x M2=  0.99x null=True  retire=0 wasted=1 
+  11_ConvTranspose2d_BatchNorm_Tanh_MaxPool_GroupNorm bucket=memory-norm                M1=  1.00x M2=  1.00x null=True  retire=0 wasted=6 
+  13_Matmul_for_symmetric_matrices bucket=compute-matmul             M1=  5.41x M2=  0.99x null=False retire=0 wasted=1 
+  15_Matmul_for_lower_triangular_matrices bucket=compute-matmul             M1=  1.00x M2=  1.00x null=True  retire=0 wasted=1 
+  18_Matmul_with_transposed_both bucket=compute-matmul             M1=  6.00x M2=  1.00x null=False retire=0 wasted=1 
+  19_ConvTranspose2d_GELU_GroupNorm bucket=memory-norm                M1=  1.00x M2=  1.03x null=True  retire=0 wasted=1 
+  1_Square_matrix_multiplication_ bucket=compute-matmul             M1=  5.77x M2=  1.00x null=False retire=0 wasted=1 
+  21_Conv2d_Add_Scale_Sigmoid_GroupNorm bucket=compute-conv-fusion        M1=  1.00x M2=  0.98x null=True  retire=0 wasted=1 
+  22_Matmul_Scale_ResidualAdd_Clamp_LogSumExp_Mish bucket=compute-matmul             M1=  5.89x M2=  1.03x null=False retire=1 wasted=9 
+  25_Swish                       bucket=memory-reduce-elementwise  M1=  1.00x M2=  1.03x null=True  retire=2 wasted=8 
+  27_Conv3d_HardSwish_GroupNorm_Mean bucket=compute-conv-fusion        M1=  1.00x M2=  1.02x null=True  retire=0 wasted=1 
+  31_ELU                         bucket=memory-reduce-elementwise  M1=  1.00x M2=  0.97x null=True  retire=0 wasted=1 
+  33_BatchNorm                   bucket=memory-norm                M1=  1.00x M2=  1.01x null=True  retire=1 wasted=8 
+  33_Gemm_Scale_BatchNorm        bucket=compute-matmul             M1=  1.00x M2=  0.99x null=True  retire=0 wasted=6 
+  34_InstanceNorm                bucket=memory-norm                M1=  1.00x M2=  0.99x null=True  retire=2 wasted=8 
+  35_GroupNorm_                  bucket=memory-norm                M1=  1.00x M2=  0.97x null=True  retire=0 wasted=1 
+  36_RMSNorm_                    bucket=memory-norm                M1=  1.00x M2=  1.02x null=True  retire=0 wasted=1 
+  37_FrobeniusNorm_              bucket=memory-norm                M1=  1.00x M2=  1.01x null=True  retire=0 wasted=1 
+  39_Gemm_Scale_BatchNorm        bucket=compute-matmul             M1=  1.00x M2=  0.99x null=True  retire=0 wasted=1 
+  3_Batched_matrix_multiplication bucket=compute-matmul             M1=  4.67x M2=  1.00x null=False retire=0 wasted=2 
+  46_Conv2d_Subtract_Tanh_Subtract_AvgPool bucket=compute-conv-fusion        M1=  1.71x M2=  0.99x null=False retire=2 wasted=12 
+  56_conv_standard_2D__asymmetric_input__asymmetric_kernel bucket=compute-conv-fusion        M1=  1.25x M2=  1.01x null=False retire=2 wasted=12 
+  60_ConvTranspose3d_Swish_GroupNorm_HardSwish bucket=memory-norm                M1=  1.00x M2=  1.01x null=True  retire=2 wasted=8 
+  62_conv_standard_2D__square_input__asymmetric_kernel bucket=compute-conv-fusion        M1=  1.00x M2=  1.05x null=True  retire=0 wasted=1 
+  66_conv_standard_3D__asymmetric_input__asymmetric_kernel bucket=compute-conv-fusion        M1=  1.00x M2=  1.04x null=True  retire=0 wasted=1 
+  71_Conv2d_Divide_LeakyReLU     bucket=compute-conv-fusion        M1=  1.00x M2=  0.99x null=True  retire=0 wasted=1 
+  75_Gemm_GroupNorm_Min_BiasAdd  bucket=compute-conv-fusion        M1=  1.00x M2=  0.97x null=True  retire=0 wasted=1 
+  75_conv_transposed_2D_asymmetric_input_asymmetric_kernel_strided__grouped____padded____dilated__ bucket=memory-reduce-elementwise  M1=  1.00x M2=  1.01x null=True  retire=2 wasted=8 
+  78_ConvTranspose3d_Max_Max_Sum bucket=memory-reduce-elementwise  M1=  1.00x M2=  1.00x null=True  retire=0 wasted=6 
+  79_conv_transposed_1D_asymmetric_input_square_kernel___padded____strided____dilated__ bucket=memory-reduce-elementwise  M1=  1.00x M2=  1.00x null=True  retire=2 wasted=8 
+  7_Matmul_with_small_K_dimension_ bucket=compute-matmul             M1=  2.61x M2=  0.99x null=False retire=0 wasted=6 
+  86_Matmul_Divide_GELU          bucket=compute-conv-fusion        M1=  1.00x M2=  0.99x null=True  retire=0 wasted=6 
+  8_Matmul_with_irregular_shapes_ bucket=compute-matmul             M1=  3.73x M2=  1.01x null=False retire=0 wasted=6 
+  90_Conv3d_LeakyReLU_Sum_Clamp_GELU bucket=compute-conv-fusion        M1=  1.00x M2=  1.00x null=True  retire=0 wasted=1 
+  90_cumprod                     bucket=memory-reduce-elementwise  M1=  1.00x M2=  1.05x null=True  retire=1 wasted=8 

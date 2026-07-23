@@ -1,0 +1,247 @@
+{
+  "chip": "a100",
+  "results": {
+    "batched_gemm": {
+      "off": {
+        "label": "evolve_OFF",
+        "metric_curve": [
+          [
+            0,
+            -0.7287149974762667
+          ],
+          [
+            1,
+            -0.21988161144746668
+          ]
+        ],
+        "fired_rules": [
+          "fp32_no_tensorcore",
+          "tensorcore_saturated"
+        ],
+        "wasted_rounds": 0,
+        "retire_count": 0,
+        "stop_reason": "stop_label",
+        "rounds": 2,
+        "signals": [
+          {
+            "occupancy": 0.2372,
+            "reg_per_thread": 118.0,
+            "l2_hit": 0.8497,
+            "load_eff": 1.0,
+            "stall_reason": "",
+            "bw_pct": 0.0574,
+            "compute_tput": 0.93,
+            "latency_us": 2636.192,
+            "weight_pct": 1.0,
+            "tensorcore_active": false,
+            "launch_gap_pct": 0.0,
+            "op_name": "",
+            "op_weight": 0.0,
+            "op_shape": "",
+            "energy_j": 813.2108929970975,
+            "energy_per_iter_j": 0.7287149974762667,
+            "p_hbm_w": 2.8541247520666175,
+            "p_die_w": 273.5730085812667,
+            "dram_bytes_read": 159738368.0,
+            "dram_bytes_write": 58983168.0,
+            "chip": "NVIDIA A100-SXM4-40GB",
+            "dram_bytes_total": 218721536.0,
+            "kernel_time_s": 0.002636192,
+            "power_avg_w": 276.42713333333336
+          },
+          {
+            "occupancy": 0.1201,
+            "reg_per_thread": 218.0,
+            "l2_hit": 0.8736,
+            "load_eff": 0.0,
+            "stall_reason": "",
+            "bw_pct": 0.32049999999999995,
+            "compute_tput": 0.7184,
+            "latency_us": 583.808,
+            "weight_pct": 1.0,
+            "tensorcore_active": true,
+            "launch_gap_pct": 0.0,
+            "op_name": "",
+            "op_weight": 0.0,
+            "op_shape": "",
+            "energy_j": 1108.1504374039046,
+            "energy_per_iter_j": 0.21988161144746668,
+            "p_hbm_w": 11.658485069063802,
+            "p_die_w": 364.9749482642695,
+            "dram_bytes_read": 140124032.0,
+            "dram_bytes_write": 57734016.0,
+            "chip": "NVIDIA A100-SXM4-40GB",
+            "dram_bytes_total": 197858048.0,
+            "kernel_time_s": 0.000583808,
+            "power_avg_w": 376.63343333333336
+          }
+        ]
+      },
+      "on": {
+        "label": "evolve_ON",
+        "metric_curve": [
+          [
+            0,
+            -0.7441365797674666
+          ],
+          [
+            1,
+            -0.22596941250986663
+          ]
+        ],
+        "fired_rules": [
+          "fp32_no_tensorcore",
+          "tensorcore_saturated"
+        ],
+        "wasted_rounds": 0,
+        "retire_count": 0,
+        "stop_reason": "stop_label",
+        "rounds": 2,
+        "signals": [
+          {
+            "occupancy": 0.2372,
+            "reg_per_thread": 118.0,
+            "l2_hit": 0.8471,
+            "load_eff": 1.0,
+            "stall_reason": "",
+            "bw_pct": 0.057699999999999994,
+            "compute_tput": 0.9296,
+            "latency_us": 2633.344,
+            "weight_pct": 1.0,
+            "tensorcore_active": false,
+            "launch_gap_pct": 0.0,
+            "op_name": "",
+            "op_weight": 0.0,
+            "op_shape": "",
+            "energy_j": 830.186960138869,
+            "energy_per_iter_j": 0.7441365797674666,
+            "p_hbm_w": 2.8706484810188106,
+            "p_die_w": 279.71171818564784,
+            "dram_bytes_read": 160776448.0,
+            "dram_bytes_write": 58973696.0,
+            "chip": "NVIDIA A100-SXM4-40GB",
+            "dram_bytes_total": 219750144.0,
+            "kernel_time_s": 0.002633344,
+            "power_avg_w": 282.58236666666664
+          },
+          {
+            "occupancy": 0.12050000000000001,
+            "reg_per_thread": 218.0,
+            "l2_hit": 0.8678,
+            "load_eff": 0.0,
+            "stall_reason": "",
+            "bw_pct": 0.3218,
+            "compute_tput": 0.7214,
+            "latency_us": 580.448,
+            "weight_pct": 1.0,
+            "tensorcore_active": true,
+            "launch_gap_pct": 0.0,
+            "op_name": "",
+            "op_weight": 0.0,
+            "op_shape": "",
+            "energy_j": 1145.3596211303425,
+            "energy_per_iter_j": 0.22596941250986663,
+            "p_hbm_w": 11.695157969017037,
+            "p_die_w": 377.6065753643163,
+            "dram_bytes_read": 139899520.0,
+            "dram_bytes_write": 57438592.0,
+            "chip": "NVIDIA A100-SXM4-40GB",
+            "dram_bytes_total": 197338112.0,
+            "kernel_time_s": 0.0005804479999999999,
+            "power_avg_w": 389.30173333333335
+          }
+        ]
+      }
+    },
+    "kb_softmax": {
+      "off": {
+        "label": "evolve_OFF",
+        "metric_curve": [
+          [
+            0,
+            -0.036021827895466665
+          ]
+        ],
+        "fired_rules": [
+          "memory_saturated"
+        ],
+        "wasted_rounds": 0,
+        "retire_count": 0,
+        "stop_reason": "stop_label",
+        "rounds": 1,
+        "signals": [
+          {
+            "occupancy": 0.9229,
+            "reg_per_thread": 25.0,
+            "l2_hit": 0.6104999999999999,
+            "load_eff": 1.0,
+            "stall_reason": "",
+            "bw_pct": 0.8801000000000001,
+            "compute_tput": 0.2731,
+            "latency_us": 178.624,
+            "weight_pct": 1.0,
+            "tensorcore_active": true,
+            "launch_gap_pct": 0.0,
+            "op_name": "",
+            "op_weight": 0.0,
+            "op_shape": "",
+            "energy_j": 591.8710117977837,
+            "energy_per_iter_j": 0.036021827895466665,
+            "p_hbm_w": 22.62600530275887,
+            "p_die_w": 179.0368613639078,
+            "dram_bytes_read": 67116416.0,
+            "dram_bytes_write": 50370432.0,
+            "chip": "NVIDIA A100-SXM4-40GB",
+            "dram_bytes_total": 117486848.0,
+            "kernel_time_s": 0.00017862399999999998,
+            "power_avg_w": 201.66286666666667
+          }
+        ]
+      },
+      "on": {
+        "label": "evolve_ON",
+        "metric_curve": [
+          [
+            0,
+            -0.03637933604266667
+          ]
+        ],
+        "fired_rules": [
+          "memory_saturated"
+        ],
+        "wasted_rounds": 0,
+        "retire_count": 0,
+        "stop_reason": "stop_label",
+        "rounds": 1,
+        "signals": [
+          {
+            "occupancy": 0.9186,
+            "reg_per_thread": 25.0,
+            "l2_hit": 0.6056,
+            "load_eff": 1.0,
+            "stall_reason": "",
+            "bw_pct": 0.8745999999999999,
+            "compute_tput": 0.2713,
+            "latency_us": 179.84,
+            "weight_pct": 1.0,
+            "tensorcore_active": true,
+            "launch_gap_pct": 0.0,
+            "op_name": "",
+            "op_weight": 0.0,
+            "op_shape": "",
+            "energy_j": 593.3035061547344,
+            "energy_per_iter_j": 0.03637933604266667,
+            "p_hbm_w": 22.473311886121,
+            "p_die_w": 179.81392144721235,
+            "dram_bytes_read": 67116928.0,
+            "dram_bytes_write": 50371456.0,
+            "chip": "NVIDIA A100-SXM4-40GB",
+            "dram_bytes_total": 117488384.0,
+            "kernel_time_s": 0.00017983999999999999,
+            "power_avg_w": 202.28723333333335
+          }
+        ]
+      }
+    }
+  }
+}
