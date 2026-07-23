@@ -110,6 +110,8 @@ Problem *definitions* for the scale-ablation phase (P8) are ingested from
 problem specs are converted into this project's `solve.py` format. The rule/evolution engine
 itself never touches KernelBench code.
 
+Methodology details: [docs/METHOD.md](docs/METHOD.md)
+
 ## 4. Evidence — where to look
 
 `artifacts/` and `results/` (raw logs, ledgers, per-run JSON) are gitignored and stay local, per
