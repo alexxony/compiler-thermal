@@ -1,5 +1,9 @@
 # Compiler-Thermal
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Tests](https://img.shields.io/badge/tests-250%20passed%20%2F%2015%20skipped-brightgreen.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+
 > This README documents the thermal-axis project. For the sibling latency-axis engine it
 > forks from, see [gpu-solver-loop](https://github.com/alexxony/gpu-solver-loop).
 

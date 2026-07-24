@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Compiler-Thermal — RC-model ΔT as a compiler judgment axis</title>
+<style>
+  :root {
+    --fg:#1a1a1a; --mut:#5c5c5c; --accent:#b8860b; --card:#fafafa; --line:#e2e2e2;
+    --bg:#ffffff; --pill-bg:#fff3cc; --pill-line:#e6c26a; --code-bg:#f0f0f0;
+    --on:#2f7a3d; --off:#8a1f1f; --on-bg:#e7f5ea; --off-bg:#fbeaea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg:#e8e8e8; --mut:#a3a3a3; --accent:#e0b23d; --card:#1b1b1b; --line:#333;
+      --bg:#111; --pill-bg:#3a3110; --pill-line:#6b5a1c; --code-bg:#232323;
+      --on:#5fd97a; --off:#f28b8b; --on-bg:#173321; --off-bg:#3a1c1c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --fg:#e8e8e8; --mut:#a3a3a3; --accent:#e0b23d; --card:#1b1b1b; --line:#333;
+    --bg:#111; --pill-bg:#3a3110; --pill-line:#6b5a1c; --code-bg:#232323;
+    --on:#5fd97a; --off:#f28b8b; --on-bg:#173321; --off-bg:#3a1c1c;
+  }
+  :root[data-theme="light"] {
+    --fg:#1a1a1a; --mut:#5c5c5c; --accent:#b8860b; --card:#fafafa; --line:#e2e2e2;
+    --bg:#ffffff; --pill-bg:#fff3cc; --pill-line:#e6c26a; --code-bg:#f0f0f0;
+    --on:#2f7a3d; --off:#8a1f1f; --on-bg:#e7f5ea; --off-bg:#fbeaea;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; color:var(--fg); line-height:1.6; background:var(--bg); }
+  .wrap { max-width:760px; margin:0 auto; padding:44px 20px 64px; }
+
+  /* ---- top ---- */
+  h1 { font-size:28px; margin:0 0 8px; letter-spacing:-0.01em; }
+  .lede { color:var(--mut); font-size:16px; margin:0 0 22px; max-width:60ch; }
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:0 0 24px; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:14px 12px; text-align:center; background:var(--card); }
+  .stat .num { font-size:22px; font-weight:700; color:var(--accent); line-height:1.2; }
+  .stat .lbl { font-size:12px; color:var(--mut); margin-top:3px; }
+  .arch { border:1px solid var(--line); border-radius:10px; padding:14px; background:var(--card); margin:0 0 8px; }
+  .arch img { width:100%; height:auto; display:block; }
+  .arch-cap { font-size:12.5px; color:var(--mut); text-align:center; margin:8px 0 0; }
+
+  /* ---- sections ---- */
+  section { margin-top:46px; }
+  h2 { font-size:20px; margin:0 0 4px; }
+  .h2sub { color:var(--mut); font-size:13.5px; margin:0 0 16px; }
+  .card { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:16px; margin:0 0 4px; }
+  .card img { width:100%; height:auto; display:block; }
+  .cap { font-size:13px; color:var(--mut); margin:10px 2px 0; }
+  .cap b { color:var(--fg); }
+  code { background:var(--code-bg); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  a { color:#3172d8; }
+  @media (prefers-color-scheme: dark) { a { color:#7aa6e8; } }
+  :root[data-theme="dark"] a { color:#7aa6e8; }
+  :root[data-theme="light"] a { color:#3172d8; }
+
+  table.cmp { width:100%; border-collapse:collapse; font-size:13px; }
+  table.cmp th, table.cmp td { border:1px solid var(--line); padding:7px 9px; text-align:left; }
+  table.cmp th { background:var(--code-bg); font-weight:600; }
+  table.cmp tr.self td { background:var(--on-bg); font-weight:600; }
+
+  /* ---- slider interaction ---- */
+  .slider-box { border:1px solid var(--line); border-radius:12px; background:var(--card); padding:20px; }
+  .duty-row { display:flex; align-items:center; gap:14px; margin-bottom:6px; flex-wrap:wrap; }
+  .duty-row input[type=range] { flex:1 1 220px; min-width:180px; accent-color:var(--accent); }
+  .duty-readout { font-weight:700; font-size:15px; min-width:112px; }
+  .duty-hint { font-size:12.5px; color:var(--mut); margin:0 0 16px; }
+  .marks { display:flex; justify-content:space-between; font-size:11.5px; color:var(--mut); margin:-10px 0 16px; padding:0 2px; }
+  .dt-compare { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+  .dt-box { border:1px solid var(--line); border-radius:8px; padding:12px; text-align:center; background:var(--bg); }
+  .dt-box .who { font-size:12px; color:var(--mut); }
+  .dt-box .val { font-size:24px; font-weight:700; margin-top:4px; }
+  .dt-box.win .val { color:var(--on); }
+  .dt-box.lose .val { color:var(--off); }
+  .verdict-line { margin-top:14px; padding-top:14px; border-top:1px dashed var(--line); font-size:14px; }
+  .verdict-line .call { font-weight:700; }
+  .verdict-line.win .call { color:var(--on); }
+  .verdict-line.lose .call { color:var(--off); }
+  .iso-note { font-size:13px; color:var(--mut); margin-top:14px; padding-top:14px; border-top:1px solid var(--line); }
+  .derived-tag { display:inline-block; font-size:10.5px; font-weight:700; letter-spacing:.02em; text-transform:uppercase; color:var(--mut); border:1px solid var(--line); border-radius:6px; padding:1px 6px; margin-left:6px; vertical-align:middle; }
+
+  /* ---- limits ---- */
+  .limits { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:16px 18px; }
+  .limits ul { margin:0; padding-left:20px; font-size:14px; }
+  .limits li { margin:8px 0; }
+
+  /* ---- footer ---- */
+  footer { margin-top:52px; padding-top:20px; border-top:1px solid var(--line); font-size:13.5px; color:var(--mut); }
+  .neighbors { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 4px; }
+  .neighbors a { border:1px solid var(--line); border-radius:8px; padding:8px 12px; text-decoration:none; color:var(--fg); font-size:13.5px; background:var(--card); }
+  .neighbors a:hover { border-color:var(--accent); }
+  .neighbors .tag { color:var(--mut); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Compiler-Thermal</h1>
+  <p class="lede">A compiler-optimization loop that judges GPU kernel transformations by
+     <b>simulated hotspot ΔT (K) from an RC thermal model</b>, not latency or raw energy —
+     the same measurement-driven rule engine as the sibling latency-axis project, with the
+     objective swapped.</p>
+
+  <div class="stats">
+    <div class="stat"><div class="num">5.32×–5.75×</div><div class="lbl">TF32 vs fp32 energy gain (matmul, A100)</div></div>
+    <div class="stat"><div class="num">17.16 K</div><div class="lbl">hotspot ΔT win at iso-work duty (15.66%)</div></div>
+    <div class="stat"><div class="num">7/8</div><div class="lbl">compute-matmul bucket reproduced, 35-problem ablation</div></div>
+  </div>
+
+  <div class="arch">
+    <img src="charts/architecture.svg" alt="Architecture: same generate/gate/profile/match/ledger/evolve loop as gpu-solver-loop, objective function swapped to RC-model hotspot delta-T"/>
+  </div>
+  <p class="arch-cap"><code>rules.py</code>, <code>evolver.py</code>, <code>ledger.py</code> are unchanged from
+     gpu-solver-loop — only <code>harness._metric(mode="thermal")</code> changed, from <code>-latency</code>
+     to <code>-energy_per_iter_j</code>. A second, independent axis converts the same measured power into
+     a hotspot ΔT (K) via a two-node RC model, cross-checked against Ansys Twin Builder.</p>
+
+  <section>
+    <h2>Try it: move the duty cycle</h2>
+    <p class="h2sub">Same matmul measurement (fp32 → TF32, A100), same RC model — only the assumed
+       duty cycle changes. Points below are the RC model evaluated directly at each duty value
+       (<code>thermal_loop/report_p4_deltat.py::_scenario_b</code>), not a fitted or hand-drawn curve.</p>
+
+    <div class="slider-box">
+      <div class="duty-row">
+        <span class="duty-readout" id="dutyReadout">15.66% (iso-work)</span>
+        <input type="range" id="dutySlider" min="0" max="7" step="1" value="0"/>
+      </div>
+      <p class="duty-hint">Drag toward 100% — the conclusion flips.</p>
+      <div class="marks"><span>15.66%</span><span>100%</span></div>
+
+      <div class="dt-compare">
+        <div class="dt-box" id="fp32Box">
+          <div class="who">fp32 (unchanged kernel)</div>
+          <div class="val" id="fp32Val">28.18 K</div>
+        </div>
+        <div class="dt-box" id="tf32Box">
+          <div class="who">TF32 (compiler transform)</div>
+          <div class="val" id="tf32Val">11.02 K</div>
+        </div>
+      </div>
+
+      <div class="verdict-line" id="verdictLine">
+        <span class="call" id="verdictCall">TF32 wins</span> by <b id="verdictGap">17.16 K</b>
+        <span class="derived-tag" id="derivedTag">measured endpoint</span>
+      </div>
+
+      <p class="iso-note">Why iso-work is the right comparison: it asks "how much heat to
+         finish the <i>same amount of work</i>," not "how much heat while running flat-out
+         forever." At 100% duty (saturated, non-realistic — nothing else ever runs), TF32's
+         higher instantaneous power makes it look worse; iso-work credits it for finishing
+         sooner and idling after. Both duty regimes are reported in the
+         <a href="https://github.com/alexxony/compiler-thermal/blob/master/README.md#5-limits--not-proven">README's Limits section</a> —
+         this isn't hidden in a footnote, it's the headline's load-bearing assumption made adjustable by hand.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Energy axis — TF32 vs fp32, 5.32×–5.75×</h2>
+    <p class="h2sub">two independent replicate runs of the same round-0→round-1 sequence (evolution OFF / ON), matmul, A100</p>
+    <div class="card"><img src="charts/matmul_energy.svg" alt="matmul energy per iteration: fp32 to TF32, OFF replicate 5.32x, ON replicate 5.75x"/></div>
+    <p class="cap">Same two-round sequence run twice (OFF/ON refer to the evolver, not two different
+       kernels) — gain is computed within each replicate, not across them. <b>5.32×</b> and <b>5.75×</b>,
+       both real A100 measurements. This is the input the 17.16 K hotspot number above is derived from.</p>
+  </section>
+
+  <section>
+    <h2>Ablation — compute-matmul bucket, 2.61×–6.00×</h2>
+    <p class="h2sub">KernelBench-derived 35-problem stratified sample, v3 pre-registered criterion</p>
+    <div class="card"><img src="charts/p8_bucket_gain.svg" alt="P8 ablation compute-matmul bucket gain range 2.61x to 6.00x across 7 non-null problems"/></div>
+    <p class="cap">7 of 8 compute-matmul problems show a real, non-null TF32 energy gain (bucket
+       reclassification, v4); at the original pre-registered criterion across all compute-bound
+       buckets, v3 reproduction is <b>40%</b> — reported alongside, not replaced. Memory-bound
+       problems correctly show <b>100% null</b> (no false gain claimed).</p>
+  </section>
+
+  <section>
+    <h2>Prior art — judged quantity × feedback loop</h2>
+    <p class="h2sub">6-system survey; no prior system couples a compiler decision to a simulated physical temperature</p>
+    <table class="cmp">
+      <thead><tr><th>System</th><th>Judged quantity</th><th>Rule/decision feedback loop</th></tr></thead>
+      <tbody>
+        <tr><td>Zhang et al. 2024 (energy-aware kernel gen)</td><td>Energy (J)</td><td>No — static cost model</td></tr>
+        <tr><td>KernelPro</td><td>Latency, energy (tiebreak)</td><td>No — LLM-judged classification</td></tr>
+        <tr><td>FlipFlop</td><td>Power/energy (static estimate)</td><td>No — static analysis</td></tr>
+        <tr><td>Zeus</td><td>Energy (J), via NVML</td><td>No — power-cap tuning</td></tr>
+        <tr><td>GPOEO</td><td>Energy, DVFS setpoint</td><td>No — online frequency search</td></tr>
+        <tr><td>LPTN / Twin Builder thermal-ROM</td><td>Temperature (°C)</td><td>N/A — never coupled to a compiler loop</td></tr>
+        <tr class="self"><td>This project</td><td>Simulated hotspot ΔT (K), via RC model</td><td>Yes — same rule/evolver/ledger as gpu-solver-loop</td></tr>
+      </tbody>
+    </table>
+    <p class="cap">Full survey and citations: <a href="https://github.com/alexxony/compiler-thermal/blob/master/README.md#2-why-this-is-needed">README §2</a>.</p>
+  </section>
+
+  <section>
+    <h2>Limits / not proven</h2>
+    <div class="limits">
+      <ul>
+        <li><b>No physical measurement — simulation vs. simulation.</b> Every ΔT and energy figure
+            comes from measured GPU power/traffic signals fed through a compact RC thermal model,
+            cross-checked against Ansys Twin Builder simulation output. No thermocouple or die-shot
+            ground truth anywhere in this chain.</li>
+        <li><b>The iso-work duty cycle (15.66%) is a chosen comparison basis, not the only valid one,
+            and it is load-bearing</b> — the slider above makes that adjustable by hand rather than
+            asserting it in a footnote.</li>
+        <li><b>KernelBench ablation is 40% at the pre-registered criterion.</b> The 87.5%/7-of-8
+            figure is a bucket reclassification of the same v3 results, not a re-measurement.</li>
+        <li><b>Hotspot amplification (1.23×–1.64×) contradicts the pre-registered expectation</b>
+            (attenuation was hypothesized going in) — reported as observed, at both a 16 W and an
+            independent 30 W condition, not adjusted to fit the hypothesis.</li>
+        <li><b>No claim of identical methodology across all three sibling repos.</b> This repo and
+            hbm-build document pre-registered hypotheses with recorded reversals and sha256-checked
+            reproducibility; gpu-solver-loop does not have documented evidence of either practice.</li>
+        <li><b>Independent verification here means re-derivation from raw ledger files by a separate
+            reviewing pass within this project</b>, not an external, disinterested third party.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    Source: <a href="https://github.com/alexxony/compiler-thermal">github.com/alexxony/compiler-thermal</a>
+    · Full methodology: <a href="https://github.com/alexxony/compiler-thermal/blob/master/README.md">README</a>
+    <div class="neighbors">
+      <a href="https://alexxony.github.io/gpu-solver-loop/">gpu-solver-loop <span class="tag">— latency-axis engine, same loop</span></a>
+      <a href="https://github.com/alexxony/hbm-build">hbm-build <span class="tag">— Icepak thermal ground truth (rc_params.csv)</span></a>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  // Real RC-model evaluations (thermal_loop/report_p4_deltat.py::_scenario_b),
+  // matmul fp32->TF32, evidence/thermal-gain-matmul-off.jsonl, RC_KW_LEGACY.
+  // Each point is a direct model run at that duty value, not an interpolation.
+  var points = [
+    { duty: 15.66, label: '15.66% (iso-work)', fp32: 28.18, tf32: 11.02, gap: 17.16, derived: 'measured endpoint' },
+    { duty: 20.00, label: '20%',               fp32: 28.18, tf32: 12.51, gap: 15.68, derived: 'RC model, this duty' },
+    { duty: 30.00, label: '30%',               fp32: 28.18, tf32: 15.12, gap: 13.07, derived: 'RC model, this duty' },
+    { duty: 40.00, label: '40%',               fp32: 28.18, tf32: 18.04, gap: 10.14, derived: 'RC model, this duty' },
+    { duty: 55.00, label: '55%',               fp32: 28.18, tf32: 22.26, gap:  5.92, derived: 'RC model, this duty' },
+    { duty: 70.00, label: '70%',               fp32: 28.18, tf32: 26.71, gap:  1.48, derived: 'RC model, this duty' },
+    { duty: 85.00, label: '85%',               fp32: 28.18, tf32: 30.59, gap: -2.41, derived: 'RC model, this duty' },
+    { duty: 100.00, label: '100% (saturated)', fp32: 28.18, tf32: 35.26, gap: -7.07, derived: 'measured endpoint' }
+  ];
+
+  var slider = document.getElementById('dutySlider');
+  var readout = document.getElementById('dutyReadout');
+  var fp32Val = document.getElementById('fp32Val');
+  var tf32Val = document.getElementById('tf32Val');
+  var fp32Box = document.getElementById('fp32Box');
+  var tf32Box = document.getElementById('tf32Box');
+  var verdictLine = document.getElementById('verdictLine');
+  var verdictCall = document.getElementById('verdictCall');
+  var verdictGap = document.getElementById('verdictGap');
+  var derivedTag = document.getElementById('derivedTag');
+
+  function render(idx) {
+    var p = points[idx];
+    readout.textContent = p.label;
+    fp32Val.textContent = p.fp32.toFixed(2) + ' K';
+    tf32Val.textContent = p.tf32.toFixed(2) + ' K';
+    derivedTag.textContent = p.derived;
+
+    var tf32Wins = p.gap > 0;
+    fp32Box.className = 'dt-box ' + (tf32Wins ? 'lose' : 'win');
+    tf32Box.className = 'dt-box ' + (tf32Wins ? 'win' : 'lose');
+    verdictLine.className = 'verdict-line ' + (tf32Wins ? 'win' : 'lose');
+    verdictCall.textContent = tf32Wins ? 'TF32 wins' : 'TF32 loses';
+    verdictGap.textContent = Math.abs(p.gap).toFixed(2) + ' K';
+  }
+
+  slider.addEventListener('input', function () { render(+slider.value); });
+  render(+slider.value);
+})();
+</script>
+
+</body>
+</html>
